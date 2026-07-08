@@ -1,0 +1,75 @@
+# ============================================================
+# ★ 记忆摘要提示词
+# ← WeKnora: config/prompt_templates/generate_summary.yaml
+#           internal/agent/memory/consolidator.go (LLM 对话摘要)
+#
+#   用于: 长期记忆的 LLM 压缩 → 将对话摘要为结构化知识
+# ============================================================
+#
+# 模板变量:
+#   {{ conversation }}      — 需要摘要的对话内容
+#   {{ max_length }}         — 摘要最大长度 (字符数)
+#   {{ language }}           — 用户语言
+
+templates:
+  - id: "conversation_summary"
+    name: "对话摘要"
+    description: "将多轮对话压缩为结构化摘要，存入长期记忆"
+    default: true
+    content: |
+      你是一个信息摘要专家。请将以下对话内容压缩为结构化的知识摘要。
+
+      ## 摘要要求
+      1. 提取对话中涉及的**核心事实和信息**
+      2. 保留**关键决策和结论**
+      3. 标注**信息来源** (如: 来自文档X)
+      4. 丢弃闲聊、问候等非信息性内容
+      5. 控制在 {{ max_length }} 字以内
+      6. 语言: {{ language }}
+
+      ## 输出格式 (Markdown)
+      ```
+      ## 对话主题
+      [一句话概括对话主题]
+
+      ## 关键信息
+      - 信息点 1 (来源: xxx)
+      - 信息点 2 (来源: xxx)
+
+      ## 结论与决策
+      - 结论 1
+      - 结论 2
+      ```
+
+      ## 对话内容
+      {{ conversation }}
+
+    user: |
+      请将以下对话摘要为结构化笔记:
+
+      {{ conversation }}
+
+  - id: "user_preference_extraction"
+    name: "用户偏好提取"
+    description: "从对话中提取用户偏好，用于中期记忆更新"
+    content: |
+      你是一个用户画像分析专家。请从以下对话中提取用户偏好。
+
+      ## 提取维度
+      1. **关注主题**: 用户反复询问的话题领域
+      2. **回答风格偏好**: 用户偏好简洁还是详细？数据驱动还是概念解释？
+      3. **常用查询模式**: 用户常用的查询类型
+      4. **文档偏好**: 用户最常引用的文档
+
+      ## 输出格式
+      ```json
+      {
+        "preferred_topics": ["主题1", "主题2"],
+        "preferred_style": "detailed|concise|data_driven|conceptual",
+        "frequently_asked": ["查询模式1", "查询模式2"],
+        "document_preferences": ["文档1", "文档2"]
+      }
+      ```
+
+      ## 对话内容
+      {{ conversation }}

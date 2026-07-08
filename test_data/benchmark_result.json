@@ -1,0 +1,438 @@
+{
+  "metadata": {
+    "indexed_chunks": 8,
+    "total_chunks": 8,
+    "retrieval_filter": {
+      "session_id": "benchmark-77224e1e",
+      "document_ids": [
+        "starvault-1ea136c5"
+      ]
+    }
+  },
+  "results": [
+    {
+      "id": "Q1",
+      "level": "L1",
+      "query": "天枢项目的预算是多少？截至6月底支出了多少？",
+      "error": null,
+      "duration_sec": 152.2,
+      "direct": {
+        "answer": "我先帮你查一下“天枢项目”的预算和截至6月底的累计支出。请稍等。",
+        "time_ms": 3677.0,
+        "model": "gpt-5.4"
+      },
+      "standard_rag": {
+        "answer": "天枢项目预算已批复 320 万元；截至 6 月底实际支出约 210 万元。",
+        "time_ms": 3675.0,
+        "docs_count": 8,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 1.0,
+          "answer_relevancy": 0.9687838815212929,
+          "context_precision": 0.9999999999,
+          "context_recall": 1.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "adaptive_rag": {
+        "answer": "天枢项目预算已批复 320 万元；截至 6 月底实际支出约 210 万元。",
+        "time_ms": 87172.0,
+        "complexity": "complex",
+        "strategy": "multi_step",
+        "docs_count": 8,
+        "model": "gpt-5.4",
+        "scores": {
+          "answer_relevancy": 0.8446326686739132,
+          "context_recall": 1.0,
+          "faithfulness": 0.0,
+          "context_precision": 0.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "conclusion": "## Comparison Summary\n\nAdaptive RAG is the preferred path for this comparison.\n- Metric deltas: faithfulness -100%, answer_relevancy -13%, context_precision -100%\n- Direct answer time: 3677ms\n- Standard RAG time: 3675ms\n- Adaptive RAG time: 87172ms\n- Adaptive strategy: complexity=complex, strategy=multi_step"
+    },
+    {
+      "id": "Q2",
+      "level": "L1",
+      "query": "玉衡项目的技术栈是什么？为什么选择了这个技术栈？",
+      "error": null,
+      "duration_sec": 241.9,
+      "direct": {
+        "answer": "如果你说的“玉衡项目”是某个具体团队/公司的内部项目，仅凭项目名我没法准确判断它的技术栈，因为叫“玉衡”的项目可能不止一个。\n\n你可以把以下任一信息发我，我就能更准确回答：\n- 项目简介 / README\n- GitHub / 仓库地址\n- 架构图\n- package.json、pom.xml、go.mod、requirements.txt 等依赖文件\n- 部署方式（Docker / K8s / 云平台）\n\n不过如果你是想问“一个叫玉衡的中后台/平台类项目通常会采用什么技术栈，以及为什么这么选”，常见答案会是：\n\n### 常见技术栈\n- **前端**：Vue / React + TypeScript + Vite\n- **后端**：Java Spring Boot / Go / Node.js\n- **数据库**：MySQL / PostgreSQL\n- **缓存**：Redis\n- **消息队列**：Kafka / RabbitMQ\n- **搜索**：Elasticsearch\n- **容器化与部署**：Docker + Kubernetes\n- **网关/代理**：Nginx / API Gateway\n- **监控日志**：Prometheus + Grafana + ELK\n\n### 为什么选择这类技术栈\n- **成熟稳定**：生态完善，适合企业项目长期维护\n- **开发效率高**：前后端框架工具链成熟，便于快速迭代\n- **可扩展性强**：支持从单体到微服务演进\n- **性能与并发能力好**：缓存、消息队列、容器编排配合后能支撑较大业务量\n- **易于运维**：容器化、监控、日志体系比较标准化\n- **招聘与团队协作成本低**：常见技术更容易组建团队和交接维护\n\n如果你愿意，我也可以：\n1. 根据你给出的仓库文件，**直接识别玉衡项目的真实技术栈**\n2. 帮你整理成一段适合汇报/答辩的表述：  \n   **“技术栈是什么 + 为什么这么选”**",
+        "time_ms": 11824.0,
+        "model": "gpt-5.4"
+      },
+      "standard_rag": {
+        "answer": "玉衡项目采用了与公司其他项目不同的技术栈，已知信息里明确提到：\n\n- **后端使用 Go 语言**\n- 团队中还有全栈与前端相关能力，表格里可见相关成员技能包括 **React**\n- DevOps 侧涉及 **K8s、Terraform、CI/CD**\n- 安全侧涉及相关安全能力\n\n如果你问的是**明确被点名的核心技术栈选择**，上下文重点强调的是：  \n- **后端不用公司其他项目通用的 Python，而改用 Go 语言**\n\n**选择原因**是：  \n- 这一选择在技术评审时引发了激烈讨论  \n- **最终因为 Go 在并发场景下的性能优势，通过了评审**\n\n所以简要来说：  \n**玉衡项目核心技术栈中，后端选用了 Go；选择它的主要原因是 Go 在高并发场景下有性能优势。**",
+        "time_ms": 6234.0,
+        "docs_count": 8,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 1.0,
+          "answer_relevancy": 0.6580368941080491,
+          "context_precision": 0.9999999999,
+          "context_recall": 1.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "adaptive_rag": {
+        "answer": "根据提供的资料，**玉衡项目的技术栈**可以确定的有：\n\n- **Go**\n- **React**\n- **K8s**\n- **Terraform**\n- **CI/CD**\n- **渗透测试**\n- **零信任架构**\n- 另外在项目简介中还提到其方向与**分布式系统**、**安全**相关\n\n对应成员技能如下：\n- **周子轩**：Go、分布式系统、安全\n- **马晓军**：Go、React、自动化运维\n- **李明**：K8s、Terraform、CI/CD\n- **黄思琪**：渗透测试、零信任架构\n\n至于**为什么选择这个技术栈**，资料中**没有直接说明原因**，所以不能确定官方选择依据。  \n如果只根据项目成员分工做非常有限的判断，能看出它与**自动化运维**、**安全**方向相匹配，但这并不是文档明确给出的原因。",
+        "time_ms": 107904.0,
+        "complexity": "complex",
+        "strategy": "multi_step",
+        "docs_count": 7,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 0.9090909090909091,
+          "answer_relevancy": 0.9752518297879662,
+          "context_precision": 0.0,
+          "context_recall": 0.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "conclusion": "## Comparison Summary\n\nAdaptive RAG is the preferred path for this comparison.\n- Metric deltas: faithfulness -9%, answer_relevancy +48%, context_precision -100%\n- Direct answer time: 11824ms\n- Standard RAG time: 6234ms\n- Adaptive RAG time: 107904ms\n- Adaptive strategy: complexity=complex, strategy=multi_step"
+    },
+    {
+      "id": "Q3",
+      "level": "L2",
+      "query": "星穹科技目前一共有多少个正在进行的项目？它们分别属于哪些部门？",
+      "error": null,
+      "duration_sec": 196.1,
+      "direct": {
+        "answer": "我目前没有你所说“星穹科技”的实时内部项目数据，因此无法直接确认“目前一共有多少个正在进行的项目，以及分别属于哪些部门”。\n\n如果你愿意，我可以帮你快速整理。你可以提供任一项：\n\n1. 项目清单/项目台账\n2. 一张包含“项目名称、状态、所属部门”的表格或截图\n3. 数据库/Excel中的相关字段\n\n我可以立即帮你统计出：\n\n- 正在进行的项目总数\n- 每个项目对应的所属部门\n- 按部门汇总的项目数量\n\n如果你想自己先判断，通常可按以下口径统计：\n\n- “正在进行”状态可包括：进行中、开发中、执行中、测试中、实施中\n- 排除状态可包括：已完成、已关闭、已暂停、已取消\n\n如果你把数据发给我，我可以直接给你整理成这样的结果：\n\n- 正在进行的项目共 X 个\n- 部门分布：\n  - 技术部：A、B、C\n  - 产品部：D、E\n  - 运营部：F\n\n如果你愿意，也可以直接把表格内容粘贴过来，我帮你算。",
+        "time_ms": 9435.0,
+        "model": "gpt-5.4"
+      },
+      "standard_rag": {
+        "answer": "目前有 **3 个正在进行的项目**：\n\n1. **“天枢”——智能客服 3.0**  \n   - 所属部门：**智能平台部**\n\n2. **“开阳”——数据分析平台**  \n   - 所属部门：**数据服务部**\n\n3. **“玉衡”——自动化运维工具**  \n   - 所属部门：**产品创新部**",
+        "time_ms": 9435.0,
+        "docs_count": 8,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 0.75,
+          "answer_relevancy": 0.7328676444966096,
+          "context_precision": 0.4777777777618519,
+          "context_recall": 1.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "adaptive_rag": {
+        "answer": "星穹科技目前有 3 个正在进行的核心项目：\n\n1. 天枢（智能客服 3.0）— 属于智能平台部  \n2. 开阳（数据分析平台）— 属于数据服务部  \n3. 玉衡（自动化运维工具）— 属于产品创新部",
+        "time_ms": 4311.0,
+        "complexity": "medium",
+        "strategy": "single_step",
+        "docs_count": 5,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 1.0,
+          "answer_relevancy": 0.8856129544799244,
+          "context_precision": 0.19999999998,
+          "context_recall": 1.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "conclusion": "## Comparison Summary\n\nAdaptive RAG is the preferred path for this comparison.\n- Metric deltas: faithfulness +33%, answer_relevancy +21%, context_precision -58%\n- Direct answer time: 9435ms\n- Standard RAG time: 9435ms\n- Adaptive RAG time: 4311ms\n- Adaptive strategy: complexity=medium, strategy=single_step"
+    },
+    {
+      "id": "Q4",
+      "level": "L2",
+      "query": "公司总预算和总支出分别是多少？哪个项目剩余预算最多？",
+      "error": null,
+      "duration_sec": 193.0,
+      "direct": {
+        "answer": "我还没有看到具体的预算数据表，所以目前无法直接算出：\n\n1. 公司总预算  \n2. 公司总支出  \n3. 剩余预算最多的项目  \n\n请把相关数据发给我，比如这种格式：\n\n| 项目 | 预算 | 支出 |\n|---|---:|---:|\n| 项目A | 100000 | 80000 |\n| 项目B | 50000 | 20000 |\n\n我拿到后可以马上帮你算出：\n- **总预算 = 所有项目预算之和**\n- **总支出 = 所有项目支出之和**\n- **剩余预算 = 预算 - 支出**\n- **剩余预算最多的项目 = 剩余预算数值最大的项目**\n\n如果你愿意，也可以直接把表格、截图里的数据贴过来，我帮你汇总。",
+        "time_ms": 10568.0,
+        "model": "gpt-5.4"
+      },
+      "standard_rag": {
+        "answer": "公司三个项目的预算和支出汇总如下：\n\n- 天枢：预算 320 万元，已支出 210 万元\n- 开阳：预算 280 万元，已支出 160 万元\n- 玉衡：预算 150 万元，已支出 95 万元\n\n合计：\n\n- 总预算：750 万元\n- 总支出：465 万元\n\n各项目剩余预算：\n\n- 天枢：110 万元\n- 开阳：120 万元\n- 玉衡：55 万元\n\n剩余预算最多的是开阳项目，为 120 万元。",
+        "time_ms": 5467.0,
+        "docs_count": 7,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 1.0,
+          "answer_relevancy": 0.8622066836979484,
+          "context_precision": 0.0,
+          "context_recall": 1.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "adaptive_rag": {
+        "answer": "公司三个项目的预算和支出分别是：\n\n- 天枢：预算 320 万元，支出 210 万元\n- 开阳：预算 280 万元，支出 160 万元\n- 玉衡：预算 150 万元，支出 95 万元\n\n合计：\n\n- 总预算：750 万元\n- 总支出：465 万元\n\n各项目剩余预算：\n\n- 天枢：110 万元\n- 开阳：120 万元\n- 玉衡：55 万元\n\n剩余预算最多的是开阳项目，为 120 万元。",
+        "time_ms": 10569.0,
+        "complexity": "medium",
+        "strategy": "single_step",
+        "docs_count": 5,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 0.6428571428571429,
+          "answer_relevancy": 0.9067679633085227,
+          "context_precision": 0.0,
+          "context_recall": 1.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "conclusion": "## Comparison Summary\n\nAdaptive RAG is the preferred path for this comparison.\n- Metric deltas: faithfulness -36%, answer_relevancy +5%\n- Direct answer time: 10568ms\n- Standard RAG time: 5467ms\n- Adaptive RAG time: 10569ms\n- Adaptive strategy: complexity=medium, strategy=single_step"
+    },
+    {
+      "id": "Q5",
+      "level": "L3",
+      "query": "如果天枢项目10月发布前需要紧急加人，谁最有可能被抽调过去帮忙？为什么？",
+      "error": null,
+      "duration_sec": 247.0,
+      "direct": {
+        "answer": "最有可能被抽调过去的人，通常会是这几类：\n\n1. **熟悉天枢项目相关模块的人**\n   - 上手最快，不需要太多培训。\n   - 能直接解决发布前的关键问题。\n\n2. **当前项目排期相对没那么紧的人**\n   - 抽调成本最低，对原团队影响较小。\n   - 管理层一般会优先从“可腾挪资源”的团队里调人。\n\n3. **有发布冲刺经验的人**\n   - 比如做过上线保障、联调、性能优化、线上问题处理的人。\n   - 10月发布前通常最缺这种“能马上顶上”的人。\n\n4. **跨团队协作能力强的人**\n   - 发布前往往涉及产品、测试、运维、研发多方配合。\n   - 能快速对齐信息、推动问题闭环的人更容易被选中。\n\n5. **核心骨干或救火型成员**\n   - 如果项目风险高，往往会优先抽调“最稳的人”。\n   - 虽然这会影响原项目，但为了保发布节点，管理层通常会这么做。\n\n**一句话判断：**\n最有可能被抽调的，是**“与天枢业务/技术最相关、当前手头压力相对可调、且有发布冲刺经验的人”**。\n\n如果你愿意，我也可以进一步帮你从**组织管理视角**分析：在你们团队里“具体哪类角色（前端/后端/测试/产品/运维）最可能被抽调”。",
+        "time_ms": 9327.0,
+        "model": "gpt-5.4"
+      },
+      "standard_rag": {
+        "answer": "最有可能被抽调去支援天枢的，按现有信息看更可能来自**开阳项目团队**，但**无法从文档中确定具体是谁**。\n\n原因主要有两点：\n\n1. **公司战略更偏向持续性收入的 SaaS 产品**\n   CTO 林振宇提到，今年会重点投入资源到“能够产生持续性收入的 SaaS 产品线”。天枢是公司的**主力产品线**，而且已经有明确的金融行业目标客户，10 月正式发布也更近，因此在发布前紧急加人时，优先保障天枢是有逻辑的。\n\n2. **相较之下，开阳更像是可被部分让渡资源的一方**\n   开阳虽然也在转标准化 SaaS，但其预计 **12 月才推出 Beta**，时间上比天枢更晚。尽管开阳的 API 层有约 2 周滞后，但整体仍处于年末节点前推进阶段，因此如果公司要短期抽调人力，**从开阳临时借调部分后端或产品相关人员**的可能性相对更高。\n\n另外，不太像优先从玉衡抽人的原因是：\n- 玉衡团队只有 **4 人**，规模很小；\n- 当前还在内部压力测试 / 内部测试阶段；\n- 技术栈是 **Go**，而公司其他项目通用的是 **Python**，与天枢的协同未必高。\n\n不过要强调：**文档没有说明跨项目借调机制、成员个人技能匹配或历史调配惯例**，所以只能做相对可能性的判断，不能确定具体会抽调哪一位。",
+        "time_ms": 9466.0,
+        "docs_count": 8,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 0.6785714285714286,
+          "answer_relevancy": 0.0,
+          "context_precision": 0.0,
+          "context_recall": 0.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "adaptive_rag": {
+        "answer": "最有可能被抽调的人，**从现有信息看更可能来自“开阳”项目团队**，但**无法精确到具体个人姓名**，因为材料里没有提供除负责人外的成员姓名。\n\n原因主要有两点：\n\n1. **公司战略更偏向持续性 SaaS 产品**\n   CTO 林振宇明确说今年会重点投入资源到“能够产生持续性收入的 SaaS 产品线”。天枢是公司“主力产品线”，而且计划 **10 月正式发布**，优先级看起来很高。\n\n2. **开阳相对更适合被调配部分人力**\n   开阳预计 **12 月才推出 Beta 版**，时间上比天枢更晚；虽然它也在推进标准化 SaaS 转型，但当前进度里是 **API 层抽象滞后于计划**。如果公司要为天枢发布保驾护航，可能会从开阳中抽调一些更通用的研发资源，尤其是：\n   - **2 名后端工程师**\n   - 或与平台能力相关的 **数据工程师**\n\n相比之下：\n\n- **玉衡**团队只有 **4 人**，规模太小，而且正处于 **MVP 完成后内部压力测试**阶段，抽人空间更有限。\n- **天枢**当前正在并行推进 **前端界面和语音模块**，如果要补人，最匹配的可能是有相关开发能力的人，但上下文没有说明其他项目成员是否具备这些技能。\n\n所以，**最可能的来源是开阳项目团队中的后端或数据工程人员**；但**具体会是谁，现有信息不足，无法确定到个人。**",
+        "time_ms": 54985.0,
+        "complexity": "complex",
+        "strategy": "multi_step",
+        "docs_count": 4,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 0.6,
+          "answer_relevancy": 0.6250289648084445,
+          "context_precision": 0.0,
+          "context_recall": 0.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "conclusion": "## Comparison Summary\n\nAdaptive RAG is the preferred path for this comparison.\n- Metric deltas: faithfulness -12%\n- Direct answer time: 9327ms\n- Standard RAG time: 9466ms\n- Adaptive RAG time: 54985ms\n- Adaptive strategy: complexity=complex, strategy=multi_step"
+    },
+    {
+      "id": "Q6",
+      "level": "L3",
+      "query": "公司目前有哪些收入来源？新战略方向是要控制什么？",
+      "error": null,
+      "duration_sec": 175.1,
+      "direct": {
+        "answer": "我目前没有你所说“公司”的具体上下文，不能准确判断是哪家公司。\n\n如果你把以下任一信息发我，我可以直接帮你总结：\n- 公司名称\n- 财报/年报截图\n- 战略会纪要\n- 新闻稿或官网链接\n\n一般来说，这两个问题通常对应的是：\n\n1. 目前有哪些收入来源  \n常见可分为：\n- 主营产品销售收入\n- 服务收入\n- 订阅/会员收入\n- 广告或平台佣金\n- 授权/IP/技术输出收入\n- 投资收益或其他非主营收入\n\n2. 新战略方向是要控制什么  \n常见表述通常是控制：\n- 成本费用\n- 风险敞口\n- 现金流\n- 产能扩张节奏\n- 渠道质量\n- 库存水平\n- 价格体系\n- 负债率\n\n如果你把具体公司材料发来，我可以直接帮你提炼成一句话或几条要点。",
+        "time_ms": 6810.0,
+        "model": "gpt-5.4"
+      },
+      "standard_rag": {
+        "answer": "公司目前的主要收入来源是：\n1. 智能客服系统的企业授权\n2. 数据分析平台的企业授权\n\n新战略方向上，CTO 林振宇提到今年会重点投入到“能够产生持续性收入的 SaaS 产品线”，并且要控制定制化项目的比例不超过总收入的 35%。",
+        "time_ms": 3753.0,
+        "docs_count": 8,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 0.5,
+          "answer_relevancy": 0.9420325134545237,
+          "context_precision": 0.8333333332916666,
+          "context_recall": 1.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "adaptive_rag": {
+        "answer": "公司目前的主要收入来源是：\n1. 智能客服系统的企业授权\n2. 数据分析平台的企业授权\n\n新战略方向里，CTO 提到要：\n- 重点投入资源到“能够产生持续性收入的 SaaS 产品线”\n- 同时控制定制化项目的比例不超过总收入的 35%",
+        "time_ms": 70655.0,
+        "complexity": "complex",
+        "strategy": "multi_step",
+        "docs_count": 8,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 1.0,
+          "answer_relevancy": 0.867344625476438,
+          "context_recall": 1.0,
+          "context_precision": 0.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "conclusion": "## Comparison Summary\n\nAdaptive RAG is the preferred path for this comparison.\n- Metric deltas: faithfulness +100%, answer_relevancy -8%, context_precision -100%\n- Direct answer time: 6810ms\n- Standard RAG time: 3753ms\n- Adaptive RAG time: 70655ms\n- Adaptive strategy: complexity=complex, strategy=multi_step"
+    },
+    {
+      "id": "Q7",
+      "level": "L4",
+      "query": "玉衡项目目前到底是什么状态？有没有什么异常？",
+      "error": null,
+      "duration_sec": 246.9,
+      "direct": {
+        "answer": "我目前看不到你们“玉衡项目”的实时数据，所以没法直接判断它现在的实际状态或是否存在异常。\n\n如果你愿意，我可以帮你快速判断。你可以直接发我以下任一信息：\n1. 项目状态面板截图\n2. 最近的日志/报错信息\n3. 监控指标（CPU、内存、接口成功率、延迟、任务堆积等）\n4. 当前你们内部对“正常状态”的定义\n\n一般判断“有没有异常”，我会先看这几类信号：\n- 服务是否在线：进程、容器、实例是否存活\n- 核心接口是否正常：成功率、超时率、错误码\n- 资源是否异常：CPU、内存、磁盘、网络\n- 任务是否阻塞：队列堆积、消费延迟、定时任务失败\n- 日志是否有异常：报错激增、重复告警、依赖连接失败\n- 上下游是否受影响：数据库、缓存、消息队列、第三方服务\n\n如果你把信息贴出来，我可以直接帮你判断成一句话，比如：\n- “项目整体运行正常，暂无明显异常”\n- “服务在线但接口错误率升高，疑似数据库连接异常”\n- “任务出现堆积，当前属于部分异常状态”",
+        "time_ms": 7845.0,
+        "model": "gpt-5.4"
+      },
+      "standard_rag": {
+        "answer": "玉衡项目目前的状态是：\n\n- 是去年底启动的新项目，负责人是周子轩，团队共 4 人：2 名全栈工程师、1 名安全工程师、1 名 DevOps 工程师。\n- 目标是做一个 AI 驱动的自动化运维工具，面向中小型互联网公司的 DevOps 团队。\n- 已获初始预算 150 万元，截至 6 月底已支出 95 万元。\n- 原计划是 6 月完成 MVP 并启动内测。\n- 当前进展是：MVP 的核心功能“日志异常检测”和“自动告警”已经开发完成，正在进行内部压力测试。\n\n关于“有没有异常”：\n\n- 从已给信息看，没有明确提到严重异常、延期或阻塞。\n- 但有一个值得关注的点：项目原预计 6 月完成 MVP 并启动内测，而当前状态描述为“正在进行内部压力测试”，没有明确说明“内测已经启动”。所以是否已按计划进入内测，现有信息不足，可能存在轻微进度不确定性。\n- 另外，玉衡采用 Go 语言而不是公司其他项目通用的 Python，这个选择在技术评审时曾引发激烈讨论，不过最终已通过评审；这更像是前期技术路线争议，不一定是当前异常。\n\n如果你愿意，我也可以顺手帮你把玉衡、天枢、开阳三个项目的风险状态做个横向对比。",
+        "time_ms": 8228.0,
+        "docs_count": 8,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 0.6956521739130435,
+          "answer_relevancy": 0.0,
+          "context_precision": 0.3333333333,
+          "context_recall": 0.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "adaptive_rag": {
+        "answer": "玉衡项目目前的状态是：\n\n- 这是产品创新部孵化的新项目，负责人是周子轩。\n- 团队共 4 人：2 名全栈工程师、1 名安全工程师、1 名 DevOps 工程师。\n- 目标是做一款 AI 驱动的自动化运维工具，面向中小型互联网公司的 DevOps 团队。\n- 项目原预计 6 月完成 MVP 并启动内测。\n- 截至 6 月底，MVP 的核心功能“日志异常检测”和“自动告警”已经开发完成，当前正在进行内部压力测试。\n- 预算方面，初始预算 150 万元，截至 6 月底已支出 95 万元。\n\n关于“有没有异常”，从已给信息看：\n\n- 没有明确提到像延期、功能未完成、预算超支这类明显异常。\n- 但有一个曾经引发争议的点：玉衡后端采用 Go，而不是公司其他项目通用的 Python。这个选择在技术评审时引发了激烈讨论，不过最终因 Go 在并发场景下的性能优势而通过评审。\n\n如果你说的“异常”是指项目风险信号，那么现有信息里没有明确写出异常，只能看出：\n- 团队规模较小，只有 4 人；\n- 目前还处在“内部压力测试”阶段，是否已经按计划启动内测，资料里没有明确说明。",
+        "time_ms": 72681.0,
+        "complexity": "complex",
+        "strategy": "multi_step",
+        "docs_count": 6,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 0.9,
+          "answer_relevancy": 0.0,
+          "context_recall": 0.0,
+          "context_precision": 0.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "conclusion": "## Comparison Summary\n\nAdaptive RAG is the preferred path for this comparison.\n- Metric deltas: faithfulness +29%, context_precision -100%\n- Direct answer time: 7845ms\n- Standard RAG time: 8228ms\n- Adaptive RAG time: 72681ms\n- Adaptive strategy: complexity=complex, strategy=multi_step"
+    },
+    {
+      "id": "Q8",
+      "level": "Boundary",
+      "query": "星穹科技下一轮融资计划是什么？预计估值多少？",
+      "error": null,
+      "duration_sec": 178.0,
+      "direct": {
+        "answer": "目前没有我可核实的公开信息显示“星穹科技”下一轮融资的明确计划或官方预计估值。\n\n如果你说的是某一家具体的“星穹科技”，建议你提供更准确的信息，我可以帮你进一步判断，例如：\n- 公司全称\n- 所属赛道/主营业务\n- 最近一轮融资时间与金额\n- 创始人或主要投资方\n\n一般判断下一轮融资计划和估值，可参考：\n1. 最近一轮融资估值与时间间隔  \n2. 收入增长、订单/用户数据  \n3. 行业热度与可比公司估值倍数  \n4. 现有股东是否继续跟投  \n5. 是否有明确资金用途（扩产、研发、出海等）\n\n如果你愿意，我也可以基于你提供的具体公司信息，帮你推测：\n- 下一轮大概会在什么时候启动\n- 可能融资金额区间\n- 可能估值区间",
+        "time_ms": 10979.0,
+        "model": "gpt-5.4"
+      },
+      "standard_rag": {
+        "answer": "检索内容中没有提到星穹科技“下一轮融资计划”或“预计估值”的信息。\n\n目前能确认的只有：\n- 公司“当前正处于 A 轮融资后的快速扩张期”。\n\n如果你需要，我可以基于现有资料帮你整理一版“已知融资阶段与公司经营现状摘要”。",
+        "time_ms": 6011.0,
+        "docs_count": 7,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 0.6666666666666666,
+          "answer_relevancy": 0.0,
+          "context_precision": 0.8055555555287036,
+          "context_recall": 0.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "adaptive_rag": {
+        "answer": "提供的资料中没有提到星穹科技“下一轮融资计划”或“预计估值”的具体信息。  \n已知只有：公司“当前正处于 A 轮融资后的快速扩张期”。\n\n如果你需要，我可以基于现有资料帮你整理一版“公司当前融资阶段与经营进展摘要”。",
+        "time_ms": 46149.0,
+        "complexity": "complex",
+        "strategy": "multi_step",
+        "docs_count": 8,
+        "model": "gpt-5.4",
+        "scores": {
+          "faithfulness": 0.75,
+          "answer_relevancy": 0.0,
+          "context_recall": 0.0,
+          "context_precision": 0.0
+        },
+        "eval_error": null,
+        "retrieved_sources": [
+          "starvault_report.md"
+        ],
+        "retrieved_chunk_ids": [
+          "starvault-1ea136c5"
+        ]
+      },
+      "conclusion": "## Comparison Summary\n\nAdaptive RAG is the preferred path for this comparison.\n- Metric deltas: faithfulness +13%, context_precision -100%\n- Direct answer time: 10979ms\n- Standard RAG time: 6011ms\n- Adaptive RAG time: 46149ms\n- Adaptive strategy: complexity=complex, strategy=multi_step"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+ID,Level,Direct_Time_ms,StdRAG_Time_ms,StdRAG_Docs,StdRAG_Faithfulness,StdRAG_Relevancy,StdRAG_Precision,AdpRAG_Time_ms,AdpRAG_Complexity,AdpRAG_Strategy,AdpRAG_Docs,AdpRAG_Faithfulness,AdpRAG_Relevancy,AdpRAG_Precision,Faithfulness_Delta%,Relevancy_Delta%,Precision_Delta%,Error
+Q1,L1,3128.0,180810.0,8,1.000,0.970,1.000,169841.0,medium,single_step,3,1.000,0.911,1.000,+0%,-6%,+0%,
+Q2,L1,21137.0,177005.0,8,0.750,0.954,0.700,181005.0,medium,single_step,3,0.833,0.574,1.000,+11%,-40%,+43%,
+Q3,L2,8810.0,183377.0,8,1.000,0.780,0.200,197428.0,medium,single_step,5,1.000,0.673,0.325,+0%,-14%,+63%,
+Q4,L2,15835.0,181576.0,7,1.000,0.814,0.000,168675.0,medium,single_step,5,1.000,0.793,0.000,+0%,-3%,N/A,
+Q5,L3,13450.0,239000.0,8,0.613,0.585,0.000,235007.0,complex,multi_step,6,0.000,0.000,0.000,-100%,-100%,N/A,
+Q6,L3,16634.0,204186.0,8,0.800,0.941,1.000,196132.0,complex,multi_step,8,0.600,0.825,0.000,-25%,-12%,-100%,
+Q7,L4,7190.0,218885.0,8,0.680,0.968,0.000,206843.0,complex,multi_step,6,0.875,0.952,0.200,+29%,-2%,N/A,
+Q8,Boundary,12906.0,175945.0,7,1.000,0.000,1.000,171973.0,complex,multi_step,8,0.750,0.000,0.000,-25%,N/A,-100%,

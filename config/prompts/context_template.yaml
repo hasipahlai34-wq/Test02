@@ -1,0 +1,70 @@
+# ============================================================
+# ★ 上下文组装模板
+# ← WeKnora: config/prompt_templates/context_template.yaml
+#           将检索到的多个文档片段组装为 LLM 的上下文
+# ============================================================
+#
+# 模板变量:
+#   {{ contexts }}          — 检索到的文档片段 (格式化的 Markdown 块)
+#   {{ query }}             — 用户查询
+#   {{ language }}          — 用户语言
+#   {{ current_time }}      — 当前时间
+
+templates:
+  - id: "default_context"
+    name: "标准上下文模板"
+    description: "将检索结果组装为结构化的 LLM 上下文"
+    default: true
+    content: |
+      [系统信息]
+      当前时间: {{ current_time }}
+
+      ## 参考资料
+      以下是从知识库中检索到的相关内容，按相关度从高到低排列:
+
+      {{ contexts }}
+
+      ---
+      ## 用户问题
+      {{ query }}
+
+      ## 回答要求
+      1. 仅基于以上参考资料回答，不要编造信息
+      2. 引用资料时使用 `<source doc="文档名" />` 标注来源
+      3. 如果参考资料不足以回答问题，请明确说明
+      4. 始终使用 {{ language }} 回答
+
+  - id: "detailed_context"
+    name: "详细上下文模板"
+    description: "包含详细说明和引用要求"
+    content: |
+      ## 任务说明
+      基于以下参考资料，准确全面地回答用户问题。
+
+      ## 参考资料
+      {{ contexts }}
+
+      ## 用户问题
+      {{ query }}
+
+      ## 回答规范
+      1. **忠实性**: 只基于参考资料回答，不得添加外部知识
+      2. **完整性**: 覆盖问题的所有方面
+      3. **可追溯**: 每个关键事实后标注来源 `<source doc="xxx" />`
+      4. **客观性**: 如多份资料存在矛盾，客观列出各方观点
+      5. **语言**: 始终使用 {{ language }} 回答
+
+      {% if current_time %}
+      当前时间: {{ current_time }}
+      {% endif %}
+
+  - id: "simple_context"
+    name: "简洁上下文模板"
+    description: "精简格式，适合简单问答"
+    content: |
+      参考资料:
+      {{ contexts }}
+
+      问题: {{ query }}
+
+      请基于以上资料回答，使用 {{ language }}。

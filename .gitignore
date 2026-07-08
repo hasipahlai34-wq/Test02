@@ -1,0 +1,54 @@
+# 密钥与证书
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 运行期数据
+data/chroma/
+data/ltm_chroma/
+data/sqlite/
+data/hitl_queue/
+data/hitl_results/
+*.sqlite
+*.sqlite3
+*.db
+
+# 日志
+*.log
+logs/
+test_data/*console*.log
+test_data/q5_recheck.*
+
+# 本地 IDE / 系统文件
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 模型与缓存文件
+models/
+model_cache/
+.cache/
+
+# 构建产物
+dist/
+build/
+*.egg-info/

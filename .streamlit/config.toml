@@ -1,0 +1,7 @@
+[browser]
+# 禁用首次启动的邮箱收集
+gatherUsageStats = false
+
+[server]
+# 无头模式运行
+headless = true
