@@ -197,15 +197,33 @@ def csv_summary(results: list[BenchmarkResult]) -> str:
         adp = r.adaptive_rag or {}
         std_scores = std.get("scores") or {}
         adp_scores = adp.get("scores") or {}
-        std_f = std_scores.get("faithfulness", 0) or 0
-        std_r = std_scores.get("answer_relevancy", 0) or 0
-        std_p = std_scores.get("context_precision", 0) or 0
-        adp_f = adp_scores.get("faithfulness", 0) or 0
-        adp_r = adp_scores.get("answer_relevancy", 0) or 0
-        adp_p = adp_scores.get("context_precision", 0) or 0
 
-        def delta(a: float, b: float) -> str:
-            return "N/A" if not b else f"{(a - b) / b * 100:+.0f}%"
+        def score(scores: dict, metric: str) -> Optional[float]:
+            value = scores.get(metric)
+            return value if isinstance(value, (int, float)) else None
+
+        def fmt(value: Optional[float]) -> str:
+            return "" if value is None else f"{value:.3f}"
+
+        def delta(a: Optional[float], b: Optional[float]) -> str:
+            return "N/A" if a is None or b is None or b == 0 else f"{(a - b) / b * 100:+.0f}%"
+
+        def errors() -> str:
+            parts = []
+            if r.error:
+                parts.append(r.error)
+            if std.get("eval_error"):
+                parts.append("standard_rag: " + str(std["eval_error"]))
+            if adp.get("eval_error"):
+                parts.append("adaptive_rag: " + str(adp["eval_error"]))
+            return " | ".join(parts)
+
+        std_f = score(std_scores, "faithfulness")
+        std_r = score(std_scores, "answer_relevancy")
+        std_p = score(std_scores, "context_precision")
+        adp_f = score(adp_scores, "faithfulness")
+        adp_r = score(adp_scores, "answer_relevancy")
+        adp_p = score(adp_scores, "context_precision")
 
         writer.writerow([
             r.question_id,
@@ -213,20 +231,20 @@ def csv_summary(results: list[BenchmarkResult]) -> str:
             round((r.direct_answer or {}).get("time_ms", 0), 0),
             round(std.get("time_ms", 0), 0),
             std.get("docs_count", 0),
-            f"{std_f:.3f}",
-            f"{std_r:.3f}",
-            f"{std_p:.3f}",
+            fmt(std_f),
+            fmt(std_r),
+            fmt(std_p),
             round(adp.get("time_ms", 0), 0),
             adp.get("complexity", "?"),
             adp.get("strategy", "?"),
             adp.get("docs_count", 0),
-            f"{adp_f:.3f}",
-            f"{adp_r:.3f}",
-            f"{adp_p:.3f}",
+            fmt(adp_f),
+            fmt(adp_r),
+            fmt(adp_p),
             delta(adp_f, std_f),
             delta(adp_r, std_r),
             delta(adp_p, std_p),
-            r.error or "",
+            errors(),
         ])
     return out.getvalue()
 

@@ -69,6 +69,84 @@ def is_table_or_numeric_query(query: str) -> bool:
     )
 
 
+STEP_BACK_PATTERNS = [
+    r"(为什么|原因|分析|评估|比较|对比|总结|归纳|风险|异常|是否合理|诊断)",
+    r"(why|reason|analy[sz]e|compare|summary|summari[sz]e|risk|diagnos)",
+]
+
+
+def should_use_step_back_query(query: str) -> bool:
+    """Return whether a complex query benefits from one abstract evidence query."""
+    normalized = (query or "").strip()
+    if not normalized or is_table_or_numeric_query(normalized):
+        return False
+
+    try:
+        from src.graph.router import (
+            is_aggregate_query,
+            is_complex_diagnostic_query,
+            is_list_aggregation_query,
+            is_single_fact_query,
+        )
+
+        if (
+            is_aggregate_query(normalized)
+            or is_list_aggregation_query(normalized)
+            or is_single_fact_query(normalized)
+        ):
+            return False
+        if is_complex_diagnostic_query(normalized):
+            return True
+    except Exception:
+        logger.debug("Step-back router helpers unavailable; using local patterns")
+
+    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in STEP_BACK_PATTERNS)
+
+
+def build_step_back_query(query: str) -> str:
+    """Build a conservative step-back query without replacing the original query."""
+    return f"{query} 相关证据 背景 原因 时间线 状态 风险 影响"
+
+
+def _document_key(doc: Document) -> str:
+    metadata = getattr(doc, "metadata", None) or {}
+    source = metadata.get("source") or getattr(doc, "source", "")
+    document_id = metadata.get("document_id", "")
+    chunk_index = metadata.get("chunk_index", getattr(doc, "chunk_index", ""))
+    if source or document_id or chunk_index != "":
+        return f"{source}|{document_id}|{chunk_index}|{_document_content(doc)[:80]}"
+    return _document_content(doc)[:200]
+
+
+def _rrf_fuse_document_lists(
+    ranked_lists: list[list[Document]],
+    k: int = 60,
+) -> list[Document]:
+    """Fuse ranked document lists from multiple query rewrites with RRF."""
+    scores: dict[str, float] = {}
+    best_docs: dict[str, Document] = {}
+    best_original_scores: dict[str, float] = {}
+
+    for documents in ranked_lists:
+        for rank, doc in enumerate(documents, start=1):
+            key = _document_key(doc)
+            if not key:
+                continue
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+            original_score = float(getattr(doc, "score", 0.0) or 0.0)
+            if key not in best_docs or original_score > best_original_scores.get(key, float("-inf")):
+                best_docs[key] = doc
+                best_original_scores[key] = original_score
+
+    fused = [
+        best_docs[key].model_copy(update={"score": score})
+        for key, score in scores.items()
+        if key in best_docs
+    ]
+    fused.sort(key=lambda doc: doc.score, reverse=True)
+    return fused
+
+
 EVIDENCE_PATTERNS = {
     "personnel": [
         "姓名",
@@ -268,6 +346,109 @@ class MultiStepStrategy(RetrievalStrategy):
             logger.warning("检索质量评估失败: %s，默认判定为充分", e)
             return True, ""
 
+    async def _build_initial_search_queries(
+        self,
+        query: str,
+        *,
+        retrieval_filter: dict | None,
+    ) -> list[str]:
+        """Build first-hop queries for uploaded-document QA."""
+        queries = [query]
+
+        try:
+            rewrites = await self._rewriter.generate_multi_queries(query, max_queries=3)
+        except Exception as e:
+            logger.warning("Multi-query rewrite unavailable: %s", e)
+            rewrites = []
+
+        for rewritten in rewrites:
+            if rewritten not in queries:
+                queries.append(rewritten)
+
+        if should_use_step_back_query(query):
+            step_back_query = build_step_back_query(query)
+            if step_back_query not in queries:
+                queries.append(step_back_query)
+
+        if retrieval_filter:
+            logger.info("Scoped retrieval: HyDE disabled for first-hop multi-query search")
+
+        return queries
+
+    async def _hyde_fallback_documents(
+        self,
+        query: str,
+        state: AgentState,
+        retrieve_once,
+        *,
+        retrieval_filter: dict | None,
+    ) -> list[Document]:
+        """Use HyDE only as a non-scoped fallback when conservative retrieval misses."""
+        if retrieval_filter or is_table_or_numeric_query(query):
+            return []
+
+        try:
+            hyde_hypothesis = await self._hyde.generate(query)
+        except Exception as e:
+            logger.warning("HyDE fallback generation failed: %s", e)
+            return []
+
+        if not hyde_hypothesis:
+            return []
+
+        state.hyde_hypothesis = hyde_hypothesis
+        try:
+            return await retrieve_once(hyde_hypothesis)
+        except Exception as e:
+            logger.warning("HyDE fallback retrieval failed: %s", e)
+            return []
+
+    async def _rerank_with_original_query(
+        self,
+        query: str,
+        documents: list[Document],
+    ) -> list[Document]:
+        """Apply the single-step reranker against the original user query."""
+        if not documents:
+            return []
+
+        rerank = getattr(self._single_step, "_rerank", None)
+        if rerank is None:
+            return documents
+
+        contents = [doc.content for doc in documents]
+        content_to_docs: dict[str, list[Document]] = {}
+        for doc in documents:
+            content_to_docs.setdefault(doc.content, []).append(doc)
+
+        try:
+            reranked = await rerank(
+                query,
+                contents,
+                top_k=len(contents),
+                threshold=float("-inf"),
+            )
+        except Exception as e:
+            logger.warning("Original-query rerank failed; using fused order: %s", e)
+            return documents
+
+        ordered: list[Document] = []
+        used_ids: set[str] = set()
+        for content, score in reranked:
+            candidates = content_to_docs.get(content, [])
+            for candidate in candidates:
+                if candidate.id in used_ids:
+                    continue
+                used_ids.add(candidate.id)
+                ordered.append(candidate.model_copy(update={"score": float(score)}))
+                break
+
+        if len(ordered) < len(documents):
+            ordered_ids = {doc.id for doc in ordered}
+            ordered.extend(doc for doc in documents if doc.id not in ordered_ids)
+
+        return ordered
+
     # ----------------------------------------------------------------
     # 主检索入口
     # ----------------------------------------------------------------
@@ -351,21 +532,62 @@ class MultiStepStrategy(RetrievalStrategy):
                     if any(_is_personnel_evidence_document(doc) for doc in all_documents):
                         break
 
-        # Step 1: HyDE 生成假设文档。数值/表格类查询保留跳过 HyDE 的低风险优化。
-        hyde_hypothesis = ""
-        if not is_table_or_numeric_query(query):
+        retrieval_filter = kwargs.get("retrieval_filter")
+
+        # Step 1: first-hop retrieval uses original + conservative rewrites.
+        # HyDE is kept only as a non-scoped fallback when this recall misses.
+        initial_queries = await self._build_initial_search_queries(
+            query,
+            retrieval_filter=retrieval_filter,
+        )
+
+        async def retrieve_initial_query(search_query: str) -> tuple[str, list[Document]]:
             try:
-                hyde_hypothesis = await self._hyde.generate(query)
-                state.hyde_hypothesis = hyde_hypothesis
+                return search_query, await retrieve_once(search_query)
             except Exception as e:
-                logger.warning("HyDE 生成失败: %s", e)
+                logger.warning("First-hop multi-query retrieval failed: %s", e)
+                return search_query, []
 
-        # 使用 HyDE 假设文档作为检索查询 (如果生成成功)
-        search_query = hyde_hypothesis or query
+        initial_results = await asyncio.gather(
+            *(retrieve_initial_query(search_query) for search_query in initial_queries)
+        )
+        completed_iterations = 1
+        fused_initial = _rrf_fuse_document_lists([documents for _, documents in initial_results])
+        fused_initial = await self._rerank_with_original_query(query, fused_initial)
+        added = add_documents(fused_initial)
+        logger.info(
+            "First-hop multi-query retrieval: queries=%d fused=%d added=%d",
+            len(initial_queries), len(fused_initial), added,
+        )
 
-        # Step 2-4: 迭代检索循环，恢复每轮检索后都评估质量的原始语义。
-        current_query = search_query
+        if not all_documents:
+            hyde_docs = await self._hyde_fallback_documents(
+                query,
+                state,
+                retrieve_once,
+                retrieval_filter=retrieval_filter,
+            )
+            if hyde_docs:
+                added = add_documents(hyde_docs)
+                logger.info("HyDE fallback added=%d", added)
+
+        # Step 2-4: iterative retrieval loop keeps the existing sufficiency semantics.
+        current_query = query
         for iteration in range(1, MAX_ITERATIONS + 1):
+            if iteration == 1:
+                sufficient, suggestion = await self._evaluate_sufficiency(
+                    query, all_documents,
+                )
+                if sufficient:
+                    logger.info("  检索评估: 充分 ✓，停止迭代")
+                    break
+                logger.info("  检索评估: 不充分 ✗ → %s", suggestion[:60])
+                if iteration < MAX_ITERATIONS:
+                    current_query = f"{query} {suggestion}"
+                    continue
+                logger.info("  已达最大迭代次数，停止")
+                break
+
             logger.info(
                 "多步检索: iteration=%d/%d query='%s...'",
                 iteration, MAX_ITERATIONS, current_query[:50],

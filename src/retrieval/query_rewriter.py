@@ -21,8 +21,9 @@
 
 from __future__ import annotations
 
-import json
 import logging
+import json
+import re
 from typing import Optional
 
 from config.settings import get_settings
@@ -139,6 +140,104 @@ class QueryRewriter:
         except Exception as e:
             logger.warning("语义重写失败: %s，使用原始查询", e)
             return query
+
+    # ----------------------------------------------------------------
+    # Multi-query rewrite for scoped document retrieval
+    # ----------------------------------------------------------------
+
+    @staticmethod
+    def _dedupe_queries(queries: list[str], original: str, max_queries: int) -> list[str]:
+        """Keep non-empty conservative rewrites, preserving order."""
+        seen = {original.strip()}
+        deduped: list[str] = []
+        for item in queries:
+            text = re.sub(r"\s+", " ", str(item or "")).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            deduped.append(text)
+            if len(deduped) >= max_queries:
+                break
+        return deduped
+
+    @staticmethod
+    def _parse_multi_query_response(response: str) -> list[str]:
+        """Parse JSON-first multi-query output with a simple line fallback."""
+        text = (response or "").strip()
+        if not text:
+            return []
+
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text).strip()
+
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+            if isinstance(parsed, dict):
+                value = parsed.get("queries") or parsed.get("query_rewrites") or []
+                if isinstance(value, list):
+                    return [str(item) for item in value]
+        except json.JSONDecodeError:
+            pass
+
+        lines = []
+        for line in text.splitlines():
+            cleaned = re.sub(r"^\s*(?:[-*]|\d+[.)]|[\"'])\s*", "", line).strip()
+            cleaned = cleaned.strip(" ,'\"")
+            if cleaned:
+                lines.append(cleaned)
+        return lines
+
+    async def generate_multi_queries(
+        self,
+        query: str,
+        conversation: str = "",
+        language: str = "中文",
+        max_queries: int = 3,
+    ) -> list[str]:
+        """
+        Generate conservative retrieval rewrites for uploaded-document QA.
+
+        max_queries is an application-level limit; it is not forwarded as an
+        LLM API parameter because OpenAI-compatible providers do not support it.
+        """
+        max_queries = max(0, int(max_queries or 0))
+        if max_queries == 0:
+            return []
+
+        prompt = f"""You are rewriting a user question for scoped document retrieval.
+Return JSON only, in this exact shape: {{"queries": ["..."]}}
+
+Rules:
+- Generate at most {max_queries} conservative retrieval queries.
+- Preserve entity names, field names, dates, numbers, and constraints.
+- Do not answer the question.
+- Do not add facts that are not in the user question.
+- Prefer short keyword-style queries that can match uploaded document chunks.
+- Use the same language as the user question.
+
+Conversation context:
+{conversation or "(none)"}
+
+User question:
+{query}
+"""
+
+        try:
+            response = await self._llm.ask(
+                prompt=prompt,
+                model_name=get_settings().llm_simple_model,
+            )
+        except Exception as e:
+            logger.warning("Multi-query rewrite failed: %s", e)
+            return []
+
+        parsed = self._parse_multi_query_response(response)
+        queries = self._dedupe_queries(parsed, query, max_queries)
+        logger.info("Multi-query rewrite: original='%s...' rewrites=%d", query[:40], len(queries))
+        return queries
 
     # ----------------------------------------------------------------
     # 完整三级改写 Pipe

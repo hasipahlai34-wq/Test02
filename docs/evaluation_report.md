@@ -1,84 +1,83 @@
-# StarVault 基准评估报告
+# Evaluation Report
 
-本项目内置 8 题 StarVault 基准测试，用于覆盖事实检索、列表聚合、数值计算、隐含推断、矛盾识别和不可回答边界判断。
+This project includes an eight-question StarVault benchmark designed to cover factual lookup, list aggregation, numeric calculation, implicit inference, contradiction detection, and unanswerable boundary behavior.
 
-## 测试设计
+## Benchmark Design
 
-测试文档：
+Test document:
 
 - `test_data/starvault_report.md`
-- 内容为一份虚构的 2025 Q2 内部项目汇报，包含项目描述、团队成员表、预算表和时间线表
+- Internal Q2 project report with project descriptions, team table, budget table, and timeline table
 
-问题分组：
+Question groups:
 
-| 题号 | 类型 | 主要能力 |
+| ID | Type | Main Capability |
 | --- | --- | --- |
-| Q1 | 单点事实 | 精确检索预算和支出 |
-| Q2 | 单点事实 | 检索技术栈和选择原因 |
-| Q3 | 列表聚合 | 汇总所有项目和所属部门 |
-| Q4 | 数值聚合 | 计算总预算、总支出和剩余预算最多的项目 |
-| Q5 | 隐含推断 | 根据技能、项目状态和时间线推断支援候选人 |
-| Q6 | 战略推断 | 关联营收来源、战略目标和业务约束 |
-| Q7 | 矛盾识别 | 识别文档内部项目时间线 / 状态不一致 |
-| Q8 | 边界问题 | 对文档未提及的融资 / 估值信息拒绝编造 |
+| Q1 | Single fact | Retrieve exact budget and spending |
+| Q2 | Single fact | Retrieve technical stack and reason |
+| Q3 | List aggregation | List all projects and departments |
+| Q4 | Numeric aggregation | Calculate total budget, total spending, and max remaining budget |
+| Q5 | Implicit inference | Infer likely support candidates from skills and project state |
+| Q6 | Strategic inference | Connect revenue sources and strategic constraints |
+| Q7 | Contradiction detection | Identify inconsistent project timeline/status |
+| Q8 | Boundary | Refuse to invent missing financing / valuation information |
 
-## 当前路由表现
+## Current Routing Behavior
 
-| 题号 | Adaptive RAG 路由 | 判断 |
+| ID | Adaptive Route | Expected |
 | --- | --- | --- |
-| Q1 | medium / single_step | 正确 |
-| Q2 | medium / single_step | 正确 |
-| Q3 | medium / single_step | 正确，列表聚合使用较高 top_k |
-| Q4 | medium / single_step | 正确，支持确定性表格计算 |
-| Q5 | complex / multi_step | 正确 |
-| Q6 | complex / multi_step | 正确 |
-| Q7 | complex / multi_step | 正确 |
-| Q8 | complex / multi_step | 正确 |
+| Q1 | medium / single_step | Correct |
+| Q2 | medium / single_step | Correct |
+| Q3 | medium / single_step | Correct, list top_k=5 |
+| Q4 | medium / single_step | Correct, deterministic table calculation available |
+| Q5 | complex / multi_step | Correct |
+| Q6 | complex / multi_step | Correct |
+| Q7 | complex / multi_step | Correct |
+| Q8 | complex / multi_step | Correct |
 
-## 为什么 Q5 和 Q8 的 RAGAS 分数可能偏低
+## Why Q5 and Q8 Can Score Poorly in RAGAS
 
-### Q5：隐含推断题
+### Q5: Implicit Inference
 
-Q5 的问题是：如果天枢项目在 10 月发布前需要紧急加人，谁最有可能被抽调过去帮忙。文档中没有直接写出“谁会被抽调”，好答案必须综合：
+Q5 asks who is likely to be reassigned if the TianShu project urgently needs people before release. The answer is not explicitly written in the document. A good answer must combine:
 
-- 团队成员表
-- 当前项目归属
-- 技术栈和技能匹配
-- 项目时间线和风险状态
+- team table
+- current project ownership
+- technical skills
+- project timeline and risk
 
-默认 RAGAS 的 faithfulness 更偏好“上下文中直接出现的事实”。因此，像“马晓军可能适合支援，因为他具备全栈和 React 经验”这样的合理推断，可能会被判为证据不足，因为文档没有直接声明他一定会被调配。
+Default RAGAS faithfulness prefers claims that are directly stated in context. A reasonable inference such as "Ma Xiaojun is a possible support candidate because he is full-stack and has React experience" may be judged unsupported because the document never explicitly states that he will be reassigned.
 
-因此 Q5 不适合只看默认 RAGAS 分数，还需要单独的推断题评分规则。
+For this reason, Q5 should be evaluated with an inference rubric, not only default RAGAS.
 
-建议检查项：
+Recommended checks:
 
-- 是否召回团队成员表
-- 是否召回项目状态和时间线证据
-- 是否给出 2-3 个候选人
-- 是否明确标注“这是基于证据的推断，不是文档直接结论”
-- 候选人理由是否包含技能、当前项目和支援场景
+- Team table chunk is retrieved.
+- Project status/timeline evidence is retrieved.
+- Answer provides 2-3 candidates.
+- Answer labels the conclusion as inference rather than direct document fact.
+- Candidate reasons cite skills, current project, and likely support scenario.
 
-### Q8：不可回答边界题
+### Q8: Unanswerable Boundary
 
-Q8 询问融资计划和估值。正确行为是明确回答：文档中没有提到相关信息。
+Q8 asks about financing plan and valuation. The correct behavior is to say the document does not mention this information.
 
-默认 RAGAS 的 context precision 和 answer relevancy 对“基于缺失信息而拒答”的场景不够友好。系统诚实地说明没有找到融资或估值信息时，反而可能因为上下文没有直接答案片段而被低估。
+Default RAGAS context precision and answer relevancy can under-score this because the correct answer is based on absence of evidence. The system should be rewarded for not inventing financing facts.
 
-建议检查项：
+Recommended checks:
 
-- 答案是否明确说明文档未提及融资或估值
-- 是否没有编造 B 轮融资、估值、投资方或融资金额
-- 检索上下文可以是公司背景相关内容，不一定存在直接答案片段
+- Answer explicitly says the document does not mention financing or valuation.
+- Answer does not invent B-round/A-round details, valuation, investors, or financing amount.
+- Retrieved contexts are allowed to be generally relevant company context rather than exact answer-bearing snippets.
 
-## 推荐评估策略
+## Recommended Evaluation Strategy
 
-RAGAS 应作为自动评估信号之一，而不是唯一指标。更稳妥的方式是结合任务型校验器：
+Use RAGAS as one signal, but combine it with task-specific validators:
 
-- Q4 类数值题：使用数值校验器检查总计、最大值、剩余值是否正确
-- Q8 类边界题：使用拒答校验器检查是否承认文档未提及
-- Q5 类隐含推断题：使用证据覆盖校验器检查团队表、项目状态和时间线是否都被召回
-- 小规模基准题：保留人工 Rubric 评分，避免只优化自动分数
+- Numeric validator for Q4-style aggregate questions
+- Abstention validator for Q8-style unanswerable questions
+- Evidence coverage validator for Q5-style implicit inference
+- Manual rubric for small benchmark reports
 
-## 总结
+This is more reliable than optimizing only for RAGAS scores.
 
-当前 Adaptive RAG 在复杂问题上已经体现出价值，尤其是隐含推断、矛盾识别和边界问题。但自动评估指标仍需要结合任务特性解释，不能简单把 RAGAS 单项低分等同于答案质量差。

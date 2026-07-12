@@ -1,4 +1,4 @@
-# 密钥与证书
+# Secrets
 .env
 .env.*
 !.env.example
@@ -6,7 +6,7 @@
 *.key
 *.crt
 
-# Python 缓存
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -16,12 +16,12 @@ __pycache__/
 .coverage
 htmlcov/
 
-# 虚拟环境
+# Virtual environments
 .venv/
 venv/
 env/
 
-# 运行期数据
+# Runtime data
 data/chroma/
 data/ltm_chroma/
 data/sqlite/
@@ -31,24 +31,24 @@ data/hitl_results/
 *.sqlite3
 *.db
 
-# 日志
+# Logs
 *.log
 logs/
 test_data/*console*.log
 test_data/q5_recheck.*
 
-# 本地 IDE / 系统文件
+# Local IDE / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-# 模型与缓存文件
-models/
+# Model and cache artifacts
+/models/
 model_cache/
 .cache/
 
-# 构建产物
+# Build artifacts
 dist/
 build/
 *.egg-info/

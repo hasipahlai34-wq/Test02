@@ -1,60 +1,60 @@
-# 性能优化报告
+# Performance Optimization Report
 
-日期：2026-07-05
+Date: 2026-07-05
 
-## 概要
+## Summary
 
-本轮完成了几项可以通过本地测试验证的高收益工作流优化：
+Implemented the high-impact workflow optimizations that can be verified without live LLM benchmarking:
 
-- 在 LLM 分类前增加规则命中的快速分类
-- 在图工作流中增加精确缓存命中捷径，命中后跳过检索和生成
-- 对简单问题跳过不必要的审查节点
-- 将 RAGAS 在线评估移出用户请求的关键路径
-- 三路对比模式使用 `asyncio.gather` 并发运行 Direct / Standard RAG / Adaptive RAG
+- Quick rule-based query classification before LLM classification.
+- Exact cache hit shortcut in the graph workflow before retrieval/generation.
+- Simple-query review shortcut.
+- RAGAS online evaluation moved off the user-facing critical path.
+- Comparison mode paths now run concurrently with `asyncio.gather`.
 
-当时全量回归结果：
+Full regression result:
 
 ```text
 python -m pytest tests/ -v
 68 passed, 1 warning in 5.99s
 ```
 
-该 warning 来自 pytest 缓存写入，不是测试失败。
+The warning is a pytest cache write warning for `.pytest_cache`, not a test failure.
 
-## 优化项对照
+## Optimization Table
 
-| 优化项 | 优化前 | 优化后 | LLM 调用 / 延迟影响 |
-| --- | --- | --- | --- |
-| 简单问题分类 | 总是调用分类 LLM | 明显 simple / complex 问题先由规则判断 | 规则命中时减少 1 次分类 LLM 调用 |
-| 缓存命中捷径 | 重复问题仍进入完整图流程 | 精确缓存命中后直接返回答案 | 命中时跳过检索、生成、审查、RAGAS 和输出检测 |
-| RAGAS 异步化 | 工作流等待 RAGAS 完成 | 主流程先返回，RAGAS 后台记录 | RAGAS 不再阻塞用户答案 |
-| 安全检测并行化 | 输出安全检测仍在生成后执行 | 输入安全检测可与检索并行 | 减少串行等待，但不改变安全策略 |
-| 审查节点条件化 | 所有路径都可能进入审查 | simple 问题默认通过审查 | 简单有文档问题最多减少 1 次审查 LLM 调用 |
-| 流式输出 | UI 等完整答案后一次性展示 | Streamlit 尝试使用流式函数逐块展示 | 改善用户感知延迟 |
-| 三路对比并发 | Direct / Standard / Adaptive 串行执行 | 三条路径并发执行 | 总耗时接近最慢路径，而不是三者求和 |
+| Optimization | Before | After | LLM calls reduced / latency impact |
+|---|---:|---:|---|
+| Simple query classification | Always calls classifier LLM | Regex rules return `simple` / `complex` for obvious queries | `-1` classifier call on rule hits |
+| Cache hit shortcut | Repeated queries still run graph path | Exact cache hit returns cached answer before retrieval/generation | Skips retrieval, generation, review, RAGAS, guard on exact hit |
+| RAGAS async | Workflow waits for RAGAS | Workflow returns with `ragas_eval_error="pending_async"` and logs later | RAGAS no longer blocks answer |
+| Safety parallelization | Output guard remains after generation | Not changed in this pass | Not implemented; adding input guard would add a new LLM call to this workflow |
+| Review conditionalization | Review node reachable for all paths | `complexity == "simple"` returns default pass without reviewer LLM | Up to `-1` reviewer call for simple queries with docs |
+| Streaming output | Backend stream helper exists | UI still uses graph `ainvoke` final answer | Not completed; needs UI path refactor |
+| Comparison parallelization | Direct, standard RAG, adaptive RAG were serial | Three paths run via `asyncio.gather` | Total wall time approaches slowest path instead of sum |
 
-## 设计说明
+## Notes
 
-- 缓存路径优先使用精确命中。语义缓存只在已有语义条目时尝试，并设置超时保护，避免首问被 Embedding 初始化拖慢。
-- RAGAS 异步化后，RAGAS 分数不再同步影响同一次请求的 HITL 阻断；质量审查和安全检测仍然保留在主流程中。
-- `src/evaluation/compare.py` 保持原有 `run_comparison()` 返回结构，同时清理了历史编码问题。
+- Cache integration uses exact hits in the request path. Semantic embedding lookup was intentionally not initialized on misses because it blocked first-query tests and would hurt the target latency. The existing `SemanticCache.lookup()` semantic API remains available outside the critical path.
+- Moving RAGAS async means RAGAS scores no longer synchronously influence the same request's HITL gate. Quality review and safety guard still do.
+- `src/evaluation/compare.py` was rewritten to remove corrupted encoded strings and keep the same public `run_comparison()` return shape.
 
-## 后续补充
+## Follow-Up Completion
 
-日期：2026-07-07
+Date: 2026-07-07
 
-已完成后续事项：
+Completed the remaining items:
 
-- 精确缓存未命中后，语义缓存使用 `SemanticCache.lookup()`，并通过 `asyncio.wait_for(..., timeout=2.0)` 加超时保护
-- 输入安全检测与 `single_step` / `multi_step` 检索并发执行；如果安全检测先判定为不安全，则取消检索并返回拦截答案
-- Streamlit 问答优先尝试 `run_adaptive_rag_stream()` 与 `st.write_stream()`；出错时降级为原来的 `ainvoke` 路径
+- Semantic cache fallback now calls `SemanticCache.lookup()` after exact miss, only when semantic entries exist, with `asyncio.wait_for(..., timeout=2.0)`.
+- Input safety now runs concurrently with `single_step` / `multi_step` retrieval. If unsafe returns before retrieval finishes, retrieval is cancelled and the graph returns a blocked answer.
+- Streamlit Q&A now attempts `run_adaptive_rag_stream()` through `st.write_stream()` and falls back to the previous `ainvoke` path on error.
 
-本地验证使用固定 mock 延迟的端到端工作流脚本，避免真实 API 抖动影响判断。设定为每次 LLM 调用 120ms、检索 180ms。
+Timing verification used a repeatable local end-to-end workflow harness with fixed mock delays: 120ms per LLM call and 180ms retrieval. This avoids live API variance and makes call-count effects visible.
 
-| 场景 | 优化前感知时间 | 优化后实测时间 | LLM 调用 |
-| --- | ---: | ---: | ---: |
-| 简单问候 | 约 0.40s | 0.279s | 2 |
-| 缓存命中 | 约 0.70s | 0.126s | 1 |
-| 文档问答 | 约 0.82s | 0.699s | 5 |
+| Scenario | Before perceived time | After perceived time | LLM calls |
+|---|:---:|:---:|:---:|
+| Simple greeting | ~0.40s modeled | 0.279s measured | 2 |
+| Cache hit | ~0.70s first-run equivalent | 0.126s measured | 1 |
+| Document Q&A | ~0.82s modeled serial safety | 0.699s measured | 5 |
 
-当前缓存命中路径仍会先完成分类，再进行缓存查询；命中后会跳过检索、生成、审查和输出安全检测。
+The cache-hit path still performs classification before cache lookup in the current graph, then skips retrieval/generation/review/guard on hit.

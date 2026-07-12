@@ -214,9 +214,9 @@ def _generate_conclusion(result: CompareResult) -> str:
 
     improvements = []
     for metric in ["faithfulness", "answer_relevancy", "context_precision"]:
-        rag_val = rag_scores.get(metric, 0)
-        adaptive_val = adaptive_scores.get(metric, 0)
-        if rag_val > 0:
+        rag_val = rag_scores.get(metric)
+        adaptive_val = adaptive_scores.get(metric)
+        if isinstance(rag_val, (int, float)) and isinstance(adaptive_val, (int, float)) and rag_val > 0:
             pct = (adaptive_val - rag_val) / rag_val * 100
             improvements.append(f"{metric} {pct:+.0f}%")
 

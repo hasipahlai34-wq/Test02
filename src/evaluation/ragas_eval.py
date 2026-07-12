@@ -20,8 +20,32 @@ import os
 import re
 from collections.abc import Mapping
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+
+def _url_host(url: str | None) -> str:
+    """Return the lowercase host for provider-safety checks."""
+    if not url:
+        return ""
+    return (urlparse(url).hostname or "").lower()
+
+
+def _resolve_ragas_eval_api_key(eval_base_url: str, settings: Any) -> str:
+    eval_api_key = os.getenv("RAGAS_EVAL_API_KEY") or getattr(
+        settings, "ragas_eval_api_key", ""
+    )
+    if eval_api_key:
+        return eval_api_key
+
+    if _url_host(eval_base_url) != _url_host(settings.llm_base_url):
+        raise RuntimeError(
+            "RAGAS_EVAL_API_KEY is required when RAGAS_EVAL_BASE_URL differs "
+            "from LLM_BASE_URL"
+        )
+
+    return settings.llm_api_key
 
 
 def extract_numbers(text: str) -> list[float]:
@@ -171,6 +195,34 @@ def _fallback_ragas_scores(ground_truth: Optional[str] = None) -> dict[str, floa
     return scores
 
 
+def _build_ragas_metrics(
+    eval_llm: Any,
+    ragas_embeddings: Any,
+    ground_truth: Optional[str],
+    relevancy_strictness: int,
+) -> list[Any]:
+    """Create fresh RAGAS metrics with explicit llm/embedding bindings."""
+    from ragas.metrics._answer_relevance import AnswerRelevancy
+    from ragas.metrics._context_precision import ContextPrecision
+    from ragas.metrics._context_recall import ContextRecall
+    from ragas.metrics._faithfulness import Faithfulness
+
+    metrics: list[Any] = [
+        Faithfulness(llm=eval_llm),
+        AnswerRelevancy(
+            llm=eval_llm,
+            embeddings=ragas_embeddings,
+            strictness=relevancy_strictness,
+        ),
+    ]
+    if ground_truth:
+        metrics.extend([
+            ContextPrecision(llm=eval_llm),
+            ContextRecall(llm=eval_llm),
+        ])
+    return metrics
+
+
 async def evaluate_ragas(
     query: str,
     answer: str,
@@ -203,15 +255,9 @@ async def evaluate_ragas(
 
     try:
         from ragas import evaluate
-        from ragas.metrics import (
-            faithfulness,
-            context_precision,
-            context_recall,
-        )
         # answer_relevancy 默认 strictness=3（生成 3 个问题，LLM 调 n=3），
         # DeepSeek 等 API 只支持 n=1，需显式设 strictness=1 避免 BadRequestError
-        from ragas.metrics._answer_relevance import AnswerRelevancy
-        answer_relevancy = None
+        from ragas.embeddings import LangchainEmbeddingsWrapper
         from ragas.llms import LangchainLLMWrapper
         from datasets import Dataset
         from langchain_openai import ChatOpenAI
@@ -226,16 +272,18 @@ async def evaluate_ragas(
             if "gpt" in settings.llm_default_model.lower() and is_official_openai
             else 1
         )
-        answer_relevancy = AnswerRelevancy(strictness=relevancy_strictness)
-
         # RAGAS 评估专用 LLM — 用 DeepSeek v4-pro（格式输出稳定），与日常问答的中转站模型分离
-        eval_model = os.getenv("RAGAS_EVAL_MODEL", "deepseek-v4-pro")
-        eval_base_url = os.getenv("RAGAS_EVAL_BASE_URL", "https://api.deepseek.com/v1")
+        eval_model = os.getenv("RAGAS_EVAL_MODEL", settings.ragas_eval_model)
+        eval_base_url = os.getenv(
+            "RAGAS_EVAL_BASE_URL",
+            settings.ragas_eval_base_url,
+        )
+        eval_api_key = _resolve_ragas_eval_api_key(eval_base_url, settings)
 
         eval_llm = LangchainLLMWrapper(
             ChatOpenAI(
                 model=eval_model,
-                api_key=settings.llm_api_key,
+                api_key=eval_api_key,
                 base_url=eval_base_url,
                 temperature=0,
                 timeout=120,
@@ -252,6 +300,7 @@ async def evaluate_ragas(
             model_name=settings.embedding_model,
             model_kwargs={"local_files_only": True},
         )
+        ragas_embeddings = LangchainEmbeddingsWrapper(eval_embeddings)
 
         # 构建 RAGAS 数据集
         eval_data = {
@@ -266,16 +315,15 @@ async def evaluate_ragas(
 
         # 选择评估指标
         # context_precision 在 ragas v0.4.3+ 需要 reference 列，只在有 ground_truth 时使用
-        metrics = [
-            faithfulness,
-            answer_relevancy,
-        ]
-        if ground_truth:
-            metrics.append(context_precision)
-            metrics.append(context_recall)
+        metrics = _build_ragas_metrics(
+            eval_llm=eval_llm,
+            ragas_embeddings=ragas_embeddings,
+            ground_truth=ground_truth,
+            relevancy_strictness=relevancy_strictness,
+        )
 
         # 执行评估（显式传入 llm 和 embeddings，不依赖环境变量）
-        result = evaluate(dataset, metrics=metrics, llm=eval_llm, embeddings=eval_embeddings)
+        result = evaluate(dataset, metrics=metrics, llm=eval_llm, embeddings=ragas_embeddings)
 
         metric_names = [metric.name for metric in metrics]
         scores = _extract_ragas_scores(result, metric_names)
@@ -285,10 +333,6 @@ async def evaluate_ragas(
                 "RAGAS did not return usable values for metrics: %s",
                 ", ".join(missing_metrics),
             )
-            fallback_scores = _fallback_ragas_scores(ground_truth)
-            for name in missing_metrics:
-                if name in fallback_scores:
-                    scores[name] = fallback_scores[name]
         if not scores:
             raise RuntimeError(
                 "RAGAS did not return usable metric scores "
@@ -311,5 +355,5 @@ async def evaluate_ragas(
         logger.warning("RAGAS 未安装或依赖不完整: %s", e)
         return _fallback_ragas_scores(ground_truth)
     except Exception as e:
-        logger.error("RAGAS 评估执行失败, 使用离线降级分数: %s", e)
-        return _fallback_ragas_scores(ground_truth)
+        logger.error("RAGAS 评估执行失败: %s", e)
+        raise

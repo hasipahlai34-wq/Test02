@@ -187,6 +187,9 @@ class Settings(BaseSettings):
     ragas_faithfulness_threshold: float = 0.6
     ragas_relevancy_threshold: float = 0.5
     ragas_context_precision_threshold: float = 0.5
+    ragas_eval_model: str = "deepseek-v4-pro"
+    ragas_eval_base_url: str = "https://api.deepseek.com/v1"
+    ragas_eval_api_key: str = ""
 
     # ================================================================
     # HITL 人机协同审核 ← 新增: 高风险回答暂停等待人工确认

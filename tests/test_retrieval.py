@@ -218,6 +218,90 @@ class TestRetrievalStrategies:
         assert "120万元" in result
 
 
+    @pytest.mark.asyncio
+    async def test_multi_step_scoped_retrieval_uses_multi_query_without_hyde(self):
+        """Uploaded-document scoped retrieval should not use HyDE as the first hop."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.retrieval.multi_step import MultiStepStrategy
+        from src.types import AgentState, Document
+
+        calls = []
+
+        class FakeSingleStep:
+            async def retrieve(self, query, state, **kwargs):
+                calls.append((query, kwargs))
+                return type("Result", (), {
+                    "documents": [
+                        Document(
+                            content=f"evidence for {query}",
+                            score=0.9,
+                            metadata={"document_id": "doc-active", "chunk_index": query},
+                        )
+                    ]
+                })()
+
+            async def _rerank(self, query, documents, top_k=5, threshold=0.3):
+                return [(doc, 1.0 - index * 0.01) for index, doc in enumerate(documents[:top_k])]
+
+        strategy = MultiStepStrategy(single_step_strategy=FakeSingleStep(), llm_client=MagicMock())
+        strategy._rewriter.generate_multi_queries = AsyncMock(
+            return_value=["天枢项目 延期 原因", "天枢项目 风险 时间线"]
+        )
+        strategy._hyde.generate = AsyncMock(return_value="hypothetical answer")
+        strategy._evaluate_sufficiency = AsyncMock(return_value=(True, ""))
+
+        retrieval_filter = {"session_id": "session-a", "document_ids": ["doc-active"]}
+        result = await strategy.retrieve(
+            "为什么天枢项目可能延期？",
+            AgentState(query="为什么天枢项目可能延期？"),
+            retrieval_filter=retrieval_filter,
+        )
+
+        called_queries = [query for query, _ in calls]
+        assert "为什么天枢项目可能延期？" in called_queries
+        assert "天枢项目 延期 原因" in called_queries
+        assert "天枢项目 风险 时间线" in called_queries
+        assert any("相关证据" in query for query in called_queries)
+        assert all(kwargs.get("retrieval_filter") == retrieval_filter for _, kwargs in calls)
+        strategy._hyde.generate.assert_not_called()
+        assert result.documents
+
+    @pytest.mark.asyncio
+    async def test_multi_step_non_scoped_empty_recall_uses_hyde_fallback(self):
+        """HyDE remains available as a fallback for non-scoped retrieval misses."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.retrieval.multi_step import MultiStepStrategy
+        from src.types import AgentState, Document
+
+        calls = []
+
+        class FakeSingleStep:
+            async def retrieve(self, query, state, **kwargs):
+                calls.append(query)
+                docs = []
+                if query == "hyde fallback query":
+                    docs = [Document(content="hyde fallback evidence", score=0.8)]
+                return type("Result", (), {"documents": docs})()
+
+            async def _rerank(self, query, documents, top_k=5, threshold=0.3):
+                return [(doc, 0.9) for doc in documents[:top_k]]
+
+        agent_state = AgentState(query="分析增长原因")
+        strategy = MultiStepStrategy(single_step_strategy=FakeSingleStep(), llm_client=MagicMock())
+        strategy._rewriter.generate_multi_queries = AsyncMock(return_value=[])
+        strategy._hyde.generate = AsyncMock(return_value="hyde fallback query")
+        strategy._evaluate_sufficiency = AsyncMock(return_value=(True, ""))
+
+        result = await strategy.retrieve("分析增长原因", agent_state)
+
+        assert "hyde fallback query" in calls
+        strategy._hyde.generate.assert_awaited_once()
+        assert agent_state.hyde_hypothesis == "hyde fallback query"
+        assert result.documents
+
+
 class TestQueryClassification:
     """查询复杂度分类测试"""
 

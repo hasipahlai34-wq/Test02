@@ -6,6 +6,7 @@
 
 import pandas as pd
 import pytest
+from types import SimpleNamespace
 
 
 class TestRAGASEvaluation:
@@ -86,6 +87,131 @@ class TestRAGASEvaluation:
             scores[name] = fallback[name]
 
         assert scores == {"answer_relevancy": 0.4, "faithfulness": 0.0}
+
+    def test_build_ragas_metrics_binds_llm_and_embeddings(self):
+        from src.evaluation.ragas_eval import _build_ragas_metrics
+
+        llm = object()
+        embeddings = object()
+
+        first = _build_ragas_metrics(llm, embeddings, "reference", 1)
+        second = _build_ragas_metrics(llm, embeddings, "reference", 1)
+
+        assert [metric.name for metric in first] == [
+            "faithfulness",
+            "answer_relevancy",
+            "context_precision",
+            "context_recall",
+        ]
+        assert all(metric.llm is llm for metric in first)
+        answer_relevancy = first[1]
+        assert answer_relevancy.embeddings is embeddings
+        assert all(left is not right for left, right in zip(first, second))
+
+    def test_safe_evaluate_reports_missing_metrics(self, monkeypatch):
+        import asyncio
+        from src.evaluation import compare
+
+        async def fake_evaluate_ragas(query, answer, contexts, ground_truth):
+            return {"faithfulness": 0.8}
+
+        monkeypatch.setattr(compare, "evaluate_ragas", fake_evaluate_ragas)
+
+        scores, eval_error = asyncio.run(compare._safe_evaluate_ragas(
+            "query",
+            "answer",
+            ["context"],
+            "ground truth",
+        ))
+
+        assert scores == {"faithfulness": 0.8}
+        assert eval_error == (
+            "Missing metrics: answer_relevancy, context_precision, context_recall"
+        )
+
+    def test_benchmark_csv_leaves_missing_metrics_blank(self):
+        import csv
+        import io
+        from test_data.run_full_benchmark import BenchmarkResult, csv_summary
+
+        result = BenchmarkResult("QX", "L1", "query")
+        result.direct_answer = {"time_ms": 1}
+        result.standard_rag = {
+            "time_ms": 2,
+            "docs_count": 1,
+            "scores": {"faithfulness": 0.5},
+            "eval_error": "Missing metrics: answer_relevancy",
+        }
+        result.adaptive_rag = {
+            "time_ms": 3,
+            "docs_count": 1,
+            "complexity": "medium",
+            "strategy": "single_step",
+            "scores": {"faithfulness": 0.25},
+        }
+
+        rows = list(csv.DictReader(io.StringIO(csv_summary([result]))))
+
+        assert rows[0]["StdRAG_Faithfulness"] == "0.500"
+        assert rows[0]["StdRAG_Relevancy"] == ""
+        assert rows[0]["StdRAG_Precision"] == ""
+        assert rows[0]["Relevancy_Delta%"] == "N/A"
+        assert "standard_rag: Missing metrics" in rows[0]["Error"]
+
+    def test_ragas_eval_key_prefers_dedicated_env(self, monkeypatch):
+        from src.evaluation.ragas_eval import _resolve_ragas_eval_api_key
+
+        monkeypatch.setenv("RAGAS_EVAL_API_KEY", "deepseek-key")
+        settings = SimpleNamespace(
+            llm_api_key="main-key",
+            llm_base_url="https://jojocode.com/v1",
+        )
+
+        assert (
+            _resolve_ragas_eval_api_key("https://api.deepseek.com/v1", settings)
+            == "deepseek-key"
+        )
+
+    def test_ragas_eval_key_rejects_cross_provider_fallback(self, monkeypatch):
+        from src.evaluation.ragas_eval import _resolve_ragas_eval_api_key
+
+        monkeypatch.delenv("RAGAS_EVAL_API_KEY", raising=False)
+        settings = SimpleNamespace(
+            llm_api_key="main-key",
+            llm_base_url="https://jojocode.com/v1",
+        )
+
+        with pytest.raises(RuntimeError, match="RAGAS_EVAL_API_KEY"):
+            _resolve_ragas_eval_api_key("https://api.deepseek.com/v1", settings)
+
+    def test_ragas_eval_key_uses_settings_field(self, monkeypatch):
+        from src.evaluation.ragas_eval import _resolve_ragas_eval_api_key
+
+        monkeypatch.delenv("RAGAS_EVAL_API_KEY", raising=False)
+        settings = SimpleNamespace(
+            llm_api_key="main-key",
+            llm_base_url="https://jojocode.com/v1",
+            ragas_eval_api_key="settings-deepseek-key",
+        )
+
+        assert (
+            _resolve_ragas_eval_api_key("https://api.deepseek.com/v1", settings)
+            == "settings-deepseek-key"
+        )
+
+    def test_ragas_eval_key_allows_same_provider_fallback(self, monkeypatch):
+        from src.evaluation.ragas_eval import _resolve_ragas_eval_api_key
+
+        monkeypatch.delenv("RAGAS_EVAL_API_KEY", raising=False)
+        settings = SimpleNamespace(
+            llm_api_key="main-key",
+            llm_base_url="https://api.deepseek.com/v1",
+        )
+
+        assert (
+            _resolve_ragas_eval_api_key("https://api.deepseek.com/v1", settings)
+            == "main-key"
+        )
 
     def test_numeric_validator_catches_wrong_budget_answer(self):
         from src.evaluation.ragas_eval import validate_numeric_answer
