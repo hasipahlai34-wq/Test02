@@ -516,7 +516,7 @@ async def test_graph_full_pipeline_with_ragas_and_hitl():
         # ---- 原有流程断言 (回归) ----
         assert result["completed"] is True
         assert "Mock 生成" in result["generated_answer"]
-        assert result.get("quality_score") == 0.85
+        assert result.get("quality_score") == 0.8  # 快速通道命中
         assert result.get("quality_passed") is True
         assert result.get("safety_risk_level") == "low"
 
@@ -543,11 +543,10 @@ async def test_graph_hitl_triggers_on_low_quality():
     """
     mock_llm = MagicMock()
     mock_llm.model_name = "mock-model"
+    # ★ 优化适配：classify 被 quick rule 捕获 + input_safety 被 prescreen 跳过
+    # ask() 实际调用顺序：review → output_safety（仅 2 次）
     mock_llm.ask = AsyncMock(
         side_effect=[
-            # classify
-            '{"complexity": "medium", "confidence": 0.8, "reasoning": "中等"}',
-            '{"safe": true, "risk_level": "low", "detected_issues": []}',
             # review: 低质量!
             '{"faithfulness": 0.3, "relevance": 0.2, "completeness": 0.1,'
             ' "overall_score": 0.2, "passed": false, "has_hallucination": true,'
@@ -576,6 +575,8 @@ async def test_graph_hitl_triggers_on_low_quality():
         "src.agents.reviewer.get_llm_client", return_value=mock_llm
     ), patch(
         "src.safety.content_guard.get_llm_client", return_value=mock_llm
+    ), patch(
+        "src.safety.content_guard._get_safety_llm_client", return_value=mock_llm
     ), patch(
         "src.retrieval.single_step.get_single_step",
         AsyncMock(return_value=mock_strategy),

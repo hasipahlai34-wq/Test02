@@ -1,83 +1,42 @@
-# Evaluation Report
+﻿# 评估报告
 
-This project includes an eight-question StarVault benchmark designed to cover factual lookup, list aggregation, numeric calculation, implicit inference, contradiction detection, and unanswerable boundary behavior.
+本项目包含一组 StarVault 基准问题，用于覆盖事实查询、列表聚合、数值计算、隐含推断、矛盾识别和不可回答边界。
 
-## Benchmark Design
+## 基准设计
 
-Test document:
+测试文档：
 
 - `test_data/starvault_report.md`
-- Internal Q2 project report with project descriptions, team table, budget table, and timeline table
+- 内部项目报告，包含项目说明、团队表、预算表和时间线表。
 
-Question groups:
+问题分组：
 
-| ID | Type | Main Capability |
+| ID | 类型 | 核心能力 |
 | --- | --- | --- |
-| Q1 | Single fact | Retrieve exact budget and spending |
-| Q2 | Single fact | Retrieve technical stack and reason |
-| Q3 | List aggregation | List all projects and departments |
-| Q4 | Numeric aggregation | Calculate total budget, total spending, and max remaining budget |
-| Q5 | Implicit inference | Infer likely support candidates from skills and project state |
-| Q6 | Strategic inference | Connect revenue sources and strategic constraints |
-| Q7 | Contradiction detection | Identify inconsistent project timeline/status |
-| Q8 | Boundary | Refuse to invent missing financing / valuation information |
+| Q1 | 单事实查询 | 找到精确预算和支出 |
+| Q2 | 单事实查询 | 找到技术栈和原因 |
+| Q3 | 列表聚合 | 列出所有项目和部门 |
+| Q4 | 数值聚合 | 计算总预算、总支出和最大剩余预算 |
+| Q5 | 隐含推断 | 根据技能和项目状态推断支援人选 |
+| Q6 | 矛盾识别 | 识别报告内部不一致信息 |
+| Q7 | 不可回答边界 | 拒绝编造缺失事实 |
+| Q8 | 多证据回答 | 综合时间线、人员和风险信息 |
 
-## Current Routing Behavior
+## 评估思路
 
-| ID | Adaptive Route | Expected |
-| --- | --- | --- |
-| Q1 | medium / single_step | Correct |
-| Q2 | medium / single_step | Correct |
-| Q3 | medium / single_step | Correct, list top_k=5 |
-| Q4 | medium / single_step | Correct, deterministic table calculation available |
-| Q5 | complex / multi_step | Correct |
-| Q6 | complex / multi_step | Correct |
-| Q7 | complex / multi_step | Correct |
-| Q8 | complex / multi_step | Correct |
+默认 RAGAS 指标适合评估答案与上下文的一致性，但对隐含推断和不可回答问题并不总是充分。因此本项目同时保留人工评分规则：
 
-## Why Q5 and Q8 Can Score Poorly in RAGAS
+- 数值题必须校验计算过程和最终数字。
+- 不可回答题必须拒绝编造。
+- 推断题必须明确说明推断性质，并列出证据。
+- 矛盾题必须指出冲突来源，而不是只给结论。
 
-### Q5: Implicit Inference
+## 当前风险
 
-Q5 asks who is likely to be reassigned if the TianShu project urgently needs people before release. The answer is not explicitly written in the document. A good answer must combine:
+- 小规模 benchmark 仍需保留人工评分规则。
+- RAGAS 在线评估会增加耗时，不应混入用户在线等待时间。
+- 对中文、表格和隐含推断题，自动评分只能作为辅助信号。
 
-- team table
-- current project ownership
-- technical skills
-- project timeline and risk
+## 建议展示方式
 
-Default RAGAS faithfulness prefers claims that are directly stated in context. A reasonable inference such as "Ma Xiaojun is a possible support candidate because he is full-stack and has React experience" may be judged unsupported because the document never explicitly states that he will be reassigned.
-
-For this reason, Q5 should be evaluated with an inference rubric, not only default RAGAS.
-
-Recommended checks:
-
-- Team table chunk is retrieved.
-- Project status/timeline evidence is retrieved.
-- Answer provides 2-3 candidates.
-- Answer labels the conclusion as inference rather than direct document fact.
-- Candidate reasons cite skills, current project, and likely support scenario.
-
-### Q8: Unanswerable Boundary
-
-Q8 asks about financing plan and valuation. The correct behavior is to say the document does not mention this information.
-
-Default RAGAS context precision and answer relevancy can under-score this because the correct answer is based on absence of evidence. The system should be rewarded for not inventing financing facts.
-
-Recommended checks:
-
-- Answer explicitly says the document does not mention financing or valuation.
-- Answer does not invent B-round/A-round details, valuation, investors, or financing amount.
-- Retrieved contexts are allowed to be generally relevant company context rather than exact answer-bearing snippets.
-
-## Recommended Evaluation Strategy
-
-Use RAGAS as one signal, but combine it with task-specific validators:
-
-- Numeric validator for Q4-style aggregate questions
-- Abstention validator for Q8-style unanswerable questions
-- Evidence coverage validator for Q5-style implicit inference
-- Manual rubric for small benchmark reports
-
-This is more reliable than optimizing only for RAGAS scores.
-
+面试或 GitHub 演示时，优先展示 `/evaluation` 的三路对比，然后用人工评分规则解释为什么自适应 RAG 在复杂问题上比固定策略更可靠。

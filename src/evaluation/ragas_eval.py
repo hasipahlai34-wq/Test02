@@ -291,15 +291,17 @@ async def evaluate_ragas(
             )
         )
 
-        # RAGAS 评估用的 Embeddings
-        # 使用 LangChain 的 HuggingFaceEmbeddings（有 embed_query 接口），
-        # evaluate() 会自动用 LangchainEmbeddingsWrapper 包装为 ragas 兼容的 BaseRagasEmbeddings。
-        # 显式传入本地模型，避免 ragas 默认创建 OpenAI embeddings 去读 OPENAI_API_KEY 环境变量。
-        from langchain_community.embeddings import HuggingFaceEmbeddings
-        eval_embeddings = HuggingFaceEmbeddings(
-            model_name=settings.embedding_model,
-            model_kwargs={"local_files_only": True},
-        )
+        # RAGAS 评估用的 Embeddings：复用项目当前 embedding 配置。
+        # 之前这里固定使用 HuggingFaceEmbeddings，会在本地无缓存时访问
+        # huggingface.co；切到 DashScope 后应避免再依赖本地模型下载。
+        from src.models.embeddings import get_embedding_model
+
+        embedding_model = get_embedding_model()
+        await embedding_model._ensure_model()
+        if embedding_model.provider == "openai":
+            eval_embeddings = embedding_model._openai_client
+        else:
+            eval_embeddings = embedding_model._local_model
         ragas_embeddings = LangchainEmbeddingsWrapper(eval_embeddings)
 
         # 构建 RAGAS 数据集

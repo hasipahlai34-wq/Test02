@@ -1,4 +1,4 @@
-# Windows GBK 编码修复说明
+﻿# Windows GBK 编码修复说明
 
 ## 问题背景
 

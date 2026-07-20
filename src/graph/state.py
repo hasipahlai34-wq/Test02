@@ -74,6 +74,7 @@ class GraphState(TypedDict, total=False):
     context_prompt: str                            # 组装后的上下文 (检索内容)
     generated_answer: str                          # 生成的回答
     answer_stream: Optional[Any]                   # 流式回答 (AsyncGenerator)
+    stream_tokens: bool                            # API streaming mode: emit answer token deltas
     from_cache: bool
     cache_hit: bool
     cache_lookup_error: Optional[str]

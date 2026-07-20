@@ -105,6 +105,8 @@ class LLMClient:
         self,
         model_name: str | None = None,
         settings: Settings | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
     ):
         """
         初始化 LLM 客户端
@@ -112,6 +114,8 @@ class LLMClient:
         Args:
             model_name: 模型名称，默认从 settings 取 llm_default_model
             settings: 全局配置对象
+            base_url: 覆盖默认 Base URL（用于独立 endpoint，如安全检测）
+            api_key: 覆盖默认 API Key（用于独立 endpoint，如安全检测）
 
         Raises:
             ValueError: API Key 未配置时给出友好提示
@@ -119,9 +123,12 @@ class LLMClient:
         self._settings = settings or get_settings()
         self.model_name = model_name or self._settings.llm_default_model
 
+        # ★ 支持独立 endpoint 覆盖（安全检测等场景）
+        self._base_url = base_url or self._settings.llm_base_url
+        self._api_key = api_key or self._settings.llm_api_key
+
         # ★ 启动时 API Key 检查 —— 友好报错而非运行时崩溃
-        api_key = self._settings.llm_api_key
-        if api_key in ("", "sk-placeholder", "sk-your-api-key-here"):
+        if self._api_key in ("", "sk-placeholder", "sk-your-api-key-here"):
             raise ValueError(
                 "\n[ERROR] LLM API Key is not configured.\n"
                 "Please follow these steps:\n"
@@ -129,8 +136,8 @@ class LLMClient:
                 "  2. Edit .env and set LLM_API_KEY=your-key\n"
                 "  3. For Ollama: LLM_BASE_URL=http://localhost:11434/v1\n"
                 "  4. Re-run the application\n"
-                f"Current LLM_API_KEY = '{api_key}'\n"
-                f"Current LLM_BASE_URL = '{self._settings.llm_base_url}'"
+                f"Current LLM_API_KEY = '{self._api_key}'\n"
+                f"Current LLM_BASE_URL = '{self._base_url}'"
             )
 
         # 默认客户端通过缓存获取
@@ -151,9 +158,10 @@ class LLMClient:
         max_tokens: int,
         timeout: int,
         max_retries: int,
+        streaming: bool = False,
     ) -> str:
         """构建缓存键"""
-        return f"{model_name}|t={temperature}|mt={max_tokens}|to={timeout}|mr={max_retries}"
+        return f"{model_name}|t={temperature}|mt={max_tokens}|to={timeout}|mr={max_retries}|stream={streaming}"
 
     def _get_or_create_client(
         self,
@@ -162,6 +170,7 @@ class LLMClient:
         max_tokens: int | None = None,
         timeout: int | None = None,
         max_retries: int | None = None,
+        streaming: bool = False,
     ) -> ChatOpenAI:
         """
         ★ 从缓存获取或创建 ChatOpenAI 实例
@@ -181,18 +190,33 @@ class LLMClient:
         to = timeout or self._settings.llm_timeout
         mr = max_retries if max_retries is not None else self._settings.llm_max_retries
 
-        key = self._make_cache_key(model_name, t, mt, to, mr)
+        key = self._make_cache_key(model_name, t, mt, to, mr, streaming)
+        # ★ 独立 endpoint 时加 base_url 到 cache key，避免与默认 endpoint 冲突
+        if self._base_url != self._settings.llm_base_url:
+            key = f"{key}|url={self._base_url}"
         if key not in self._client_cache:
+            callback_kwargs: dict[str, Any] = {}
+            try:
+                from src.utils.observability import get_langfuse_callback_handler
+
+                langfuse_handler = get_langfuse_callback_handler(self._settings)
+                if langfuse_handler is not None:
+                    callback_kwargs["callbacks"] = [langfuse_handler]
+            except Exception as e:
+                logger.debug("Langfuse callback setup skipped: %s", e)
+
             self._client_cache[key] = ChatOpenAI(
                 model=model_name,
-                api_key=self._settings.llm_api_key,
-                base_url=self._settings.llm_base_url,
+                api_key=self._api_key,
+                base_url=self._base_url,
                 temperature=t,
                 max_tokens=mt,
                 timeout=to,
                 max_retries=mr,
+                streaming=streaming,
+                **callback_kwargs,
             )
-            logger.debug("ChatOpenAI 缓存创建: model=%s", model_name)
+            logger.debug("ChatOpenAI 缓存创建: model=%s base_url=%s", model_name, self._base_url)
         return self._client_cache[key]
 
     # ----------------------------------------------------------------
@@ -323,10 +347,10 @@ class LLMClient:
         Yields:
             生成的文本片段 (delta)
         """
-        if model_name and model_name != self.model_name:
-            client = self._get_or_create_client(model_name=model_name)
-        else:
-            client = self._client
+        client = self._get_or_create_client(
+            model_name=model_name or self.model_name,
+            streaming=True,
+        )
 
         lc_messages: list[BaseMessage] = []
         if system_prompt:

@@ -36,6 +36,10 @@ data/hitl_results/
 logs/
 test_data/*console*.log
 test_data/q5_recheck.*
+test_data/简历描述
+test_data/面试话术_*.md
+test_data/优化实施方案_*.md
+test_data/*resume*.pdf
 
 # Local IDE / OS
 .vscode/
@@ -52,3 +56,14 @@ model_cache/
 dist/
 build/
 *.egg-info/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/.npm-cache/
+frontend/out/
+
+!frontend/.env.local.example
+
+# Docker / local compose overrides
+docker-compose.override.yml

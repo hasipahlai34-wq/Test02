@@ -68,11 +68,24 @@ def _build_context(
     for i, doc in enumerate(documents, 1):
         source = doc.metadata.get("source", doc.source or "未知来源")
         content = doc.content[:1500]  # 每个文档最多取 1500 字符（C1/D3 修复：减少截断遗漏）
+        metadata_hints = []
+        for key, label in (
+            ("retrieval_scope", "检索范围"),
+            ("query_intent", "查询意图"),
+            ("element_type", "结构类型"),
+            ("section_path", "章节路径"),
+            ("row_range", "行范围"),
+        ):
+            value = doc.metadata.get(key)
+            if value:
+                metadata_hints.append(f"{label}: {value}")
+        metadata_line = f"**结构元数据**: {'; '.join(metadata_hints)}\n" if metadata_hints else ""
 
         part = (
             f"### 文档片段 {i}\n"
             f"**来源**: {source}\n"
             f"**相关度**: {doc.score:.2f}\n"
+            f"{metadata_line}"
             f"\n{content}\n"
         )
 

@@ -1,684 +1,505 @@
-"""Streamlit frontend for the Adaptive RAG demo."""
+"""Streamlit UI for the Adaptive RAG application."""
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# Ensure project root is on sys.path when running via `streamlit run ui/app.py`
+_project_root = Path(__file__).resolve().parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 import asyncio
-import queue
 import tempfile
-import threading
-import time
 import uuid
+from typing import Any
 
 import streamlit as st
-from ui.utils import run_async
 
 
-PAGE_DOCS = "文档管理"
-PAGE_CHAT = "智能问答"
-PAGE_COMPARE = "对比评估"
-PAGE_MONITOR = "系统监控"
-PAGE_MEMORY = "记忆管理"
+COMPLEXITY_LABELS = {
+    "simple": "简单问题",
+    "medium": "标准 RAG",
+    "complex": "复杂推理",
+}
 
-
-if "_rag_session_id" not in st.session_state:
-    st.session_state["_rag_session_id"] = str(uuid.uuid4())
-if "_active_document_ids" not in st.session_state:
-    st.session_state["_active_document_ids"] = []
-if "_active_sources" not in st.session_state:
-    st.session_state["_active_sources"] = []
-
-
-def _stream_text(text: str):
-    """Yield text in small chunks so Streamlit renders a visible typewriter stream."""
-    for char in text:
-        yield char
-        time.sleep(0.005)
-
-
-def _write_streaming_answer(query: str, session_id: str, retrieval_filter: dict | None):
-    """Stream graph updates into Streamlit and return (answer, final_state)."""
-    from src.graph.workflow import run_adaptive_rag_stream
-
-    chunks: list[str] = []
-    final_state: dict = {}
-    item_queue: queue.Queue = queue.Queue()
-    sentinel = object()
-
-    async def consume_stream() -> None:
-        try:
-            async for event in run_adaptive_rag_stream(
-                query,
-                session_id=session_id,
-                config={"configurable": {"thread_id": session_id}},
-                retrieval_filter=retrieval_filter,
-            ):
-                for update in event.values():
-                    if not isinstance(update, dict):
-                        continue
-                    final_state.update(update)
-                    answer_stream = update.get("answer_stream")
-                    if answer_stream:
-                        async for chunk in answer_stream:
-                            if chunk:
-                                item_queue.put(chunk)
-                        continue
-                    answer = update.get("generated_answer")
-                    if answer:
-                        item_queue.put(("answer", answer))
-            item_queue.put(sentinel)
-        except Exception as e:
-            item_queue.put(e)
-
-    def runner() -> None:
-        asyncio.run(consume_stream())
-
-    def sync_chunks():
-        thread = threading.Thread(target=runner, daemon=True)
-        thread.start()
-        rendered_answer = ""
-        while True:
-            item = item_queue.get()
-            if item is sentinel:
-                break
-            if isinstance(item, Exception):
-                raise item
-            if (
-                isinstance(item, tuple)
-                and len(item) == 2
-                and item[0] == "answer"
-            ):
-                answer = item[1]
-                if not isinstance(answer, str):
-                    continue
-                if answer.startswith(rendered_answer):
-                    delta = answer[len(rendered_answer):]
-                elif not rendered_answer:
-                    delta = answer
-                else:
-                    delta = ""
-                rendered_answer = answer
-                for chunk in _stream_text(delta):
-                    chunks.append(chunk)
-                    yield chunk
-                continue
-            chunks.append(item)
-            yield item
-        thread.join(timeout=1)
-
-    rendered = st.write_stream(sync_chunks())
-    return rendered or "".join(chunks), final_state
-
-
-def render_ragas_score(scores: dict | None, metric: str, label: str) -> None:
-    """Render a RAGAS score without treating missing metrics as zero."""
-    if scores is None:
-        st.metric(label, "评估失败")
-        return
-
-    if metric not in scores:
-        st.metric(label, "未评估")
-        return
-
-    try:
-        st.metric(label, f"{float(scores[metric]):.3f}")
-    except (TypeError, ValueError):
-        st.metric(label, "无效")
-
-
-def current_retrieval_filter() -> dict | None:
-    document_ids = st.session_state.get("_active_document_ids") or []
-    if not document_ids:
-        return None
-    return {
-        "session_id": st.session_state["_rag_session_id"],
-        "document_ids": document_ids,
-    }
+STRATEGY_LABELS = {
+    "no_retrieval": "无需检索",
+    "single_step": "单步检索",
+    "multi_step": "多步检索",
+}
 
 
 st.set_page_config(
-    page_title="Adaptive RAG 自适应文档问答系统",
-    page_icon="📚",
+    page_title="Adaptive RAG 文档问答系统",
+    page_icon="🔎",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 
-if "reranker_warmup_triggered" not in st.session_state:
-    st.session_state.reranker_warmup_triggered = True
+CUSTOM_CSS = """
+<style>
+.main .block-container {
+    max-width: 1280px;
+    padding-top: 1.6rem;
+    padding-bottom: 3rem;
+}
+[data-testid="stMetricValue"] {
+    font-size: 1.35rem;
+}
+.ar-hero {
+    border: 1px solid #d8dee9;
+    border-radius: 8px;
+    padding: 1.1rem 1.25rem;
+    background: #ffffff;
+    margin-bottom: 1rem;
+}
+.ar-hero h1 {
+    font-size: 1.75rem;
+    margin: 0 0 .35rem 0;
+    letter-spacing: 0;
+}
+.ar-hero p {
+    margin: 0;
+    color: #4b5563;
+    line-height: 1.55;
+}
+.ar-panel {
+    border: 1px solid #d8dee9;
+    border-radius: 8px;
+    padding: 1rem;
+    background: #ffffff;
+}
+.ar-muted {
+    color: #6b7280;
+    font-size: .9rem;
+}
+.ar-pill {
+    display: inline-block;
+    border: 1px solid #c9d3df;
+    border-radius: 999px;
+    padding: .12rem .55rem;
+    margin: .1rem .25rem .1rem 0;
+    color: #334155;
+    background: #f8fafc;
+    font-size: .82rem;
+}
+.ar-source {
+    border-left: 3px solid #64748b;
+    padding: .45rem .7rem;
+    margin: .45rem 0;
+    background: #f8fafc;
+}
+</style>
+"""
+
+
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+
+def run_coro(coro):
+    """Run an async coroutine from Streamlit's synchronous script context."""
     try:
-        from src.retrieval.single_step import warmup_reranker
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
 
-        warmup_reranker()
-    except Exception:
-        pass
-
-
-st.sidebar.title("📚 Adaptive RAG")
-st.sidebar.caption("基于 LangGraph 的自适应文档问答系统")
-
-reranker_status = "not_started"
-try:
-    from src.retrieval.single_step import get_reranker_status
-
-    reranker_status = get_reranker_status()
-except Exception:
-    pass
-
-if reranker_status == "warming":
-    st.sidebar.info("正在加载检索模型，首次提问可能稍慢。")
-elif reranker_status == "failed":
-    st.sidebar.warning("检索模型预热失败，将在首次提问时加载。")
-
-page = st.sidebar.radio(
-    "导航",
-    [PAGE_DOCS, PAGE_CHAT, PAGE_COMPARE, PAGE_MONITOR, PAGE_MEMORY],
-)
-
-st.sidebar.divider()
-st.sidebar.caption("技术栈：LangGraph + ChromaDB + Streamlit")
-st.sidebar.caption("论文：Adaptive-RAG (NAACL 2024)")
-st.sidebar.divider()
-st.sidebar.caption("当前检索范围")
-st.sidebar.text(f"会话：{st.session_state['_rag_session_id'][:8]}")
-active_sources = st.session_state.get("_active_sources", [])
-if active_sources:
-    st.sidebar.caption(f"当前文档：{len(active_sources)}")
-    for source in active_sources:
-        st.sidebar.text(f"- {source}")
-else:
-    st.sidebar.warning("请先上传并处理文档。")
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
-if page == PAGE_DOCS:
-    st.title("文档管理")
-    st.caption("上传文档 → 自动分块 → 写入索引 → 支持检索")
+@st.cache_resource(show_spinner=False)
+def get_indexer():
+    from src.ingestion.indexer import DocumentIndexer
 
-    col1, col2 = st.columns([1, 1])
-
-    with col1:
-        st.subheader("上传文档")
-        uploaded_file = st.file_uploader(
-            "支持 PDF / Word / Markdown / TXT / CSV",
-            type=["pdf", "docx", "md", "txt", "csv"],
-            help="拖拽文件到此处，或点击选择文件。",
-        )
-
-        if uploaded_file:
-            temp_dir = Path(tempfile.gettempdir()) / "adaptive_rag_uploads"
-            temp_dir.mkdir(exist_ok=True)
-            filepath = temp_dir / uploaded_file.name
-
-            with open(filepath, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-
-            st.success(f"已上传：{uploaded_file.name} ({uploaded_file.size / 1024:.1f} KB)")
-
-            if st.button("处理文档（加载 → 分块 → 索引）", type="primary"):
-                progress = st.progress(0, text="准备处理文档...")
-                status = st.empty()
-                try:
-                    from config.settings import get_settings
-
-                    settings = get_settings()
-                    if settings.embedding_provider == "local":
-                        st.info("正在加载本地 Embedding 模型，首次使用可能需要 1-2 分钟。")
-
-                    def _on_index_progress(done: int, total: int) -> None:
-                        progress.progress(
-                            50 + int(50 * done / max(total, 1)),
-                            text=f"正在索引 chunk {done}/{total}",
-                        )
-
-                    async def _process():
-                        from src.ingestion.chunker import auto_chunk
-                        from src.ingestion.indexer import DocumentIndexer
-                        from src.ingestion.loader import load_document
-
-                        rag_session_id = st.session_state["_rag_session_id"]
-                        document_id = str(uuid.uuid4())
-                        source_name = uploaded_file.name
-
-                        status.info("正在加载文档...")
-                        docs = await load_document(filepath)
-                        st.session_state["_raw_docs"] = docs
-                        progress.progress(25, text=f"已加载 {len(docs)} 个原始片段")
-
-                        status.info("正在分块...")
-                        chunks = auto_chunk(str(filepath))
-                        for i, chunk in enumerate(chunks):
-                            chunk.metadata["session_id"] = rag_session_id
-                            chunk.metadata["document_id"] = document_id
-                            chunk.metadata["source"] = str(filepath)
-                            chunk.metadata["source_name"] = source_name
-                            chunk.metadata["chunk_index"] = i
-                        st.session_state["_chunks"] = chunks
-                        progress.progress(50, text=f"已生成 {len(chunks)} 个 chunk")
-
-                        status.info("正在写入向量索引...")
-                        indexer = DocumentIndexer()
-                        await indexer.delete_by_session(rag_session_id)
-                        count = await indexer.index_documents(
-                            chunks,
-                            progress_callback=_on_index_progress,
-                        )
-                        return docs, chunks, count, document_id, source_name
-
-                    raw_docs, chunks, count, document_id, source_name = run_async(_process)
-                    if chunks and count == 0:
-                        st.error("索引失败：没有 chunk 写入向量库。")
-                    else:
-                        st.session_state["_active_document_ids"] = [document_id]
-                        st.session_state["_active_sources"] = [source_name]
-                        progress.progress(
-                            100,
-                            text=f"处理完成：{count}/{len(chunks)} 个 chunk 已索引",
-                        )
-                        st.success(
-                            f"处理完成：{len(raw_docs)} 个原始片段 → "
-                            f"{len(chunks)} 个分块 → {count} 个已索引"
-                        )
-                except Exception as e:
-                    st.error(f"处理失败：{e}")
-
-        st.divider()
-        st.subheader("已索引文档")
-        if st.button("清空当前会话索引"):
-            try:
-                async def _clear_session():
-                    from src.ingestion.indexer import DocumentIndexer
-
-                    idx = DocumentIndexer()
-                    return await idx.delete_by_session(st.session_state["_rag_session_id"])
-
-                deleted = run_async(_clear_session)
-                st.session_state["_active_document_ids"] = []
-                st.session_state["_active_sources"] = []
-                st.session_state["_chunks"] = []
-                st.success(f"已清空当前会话索引：{deleted} 个 chunk")
-            except Exception as e:
-                st.warning(f"清空当前会话索引失败：{e}")
-
-        if st.button("刷新列表"):
-            try:
-                async def _list_sources():
-                    from src.ingestion.indexer import DocumentIndexer
-
-                    idx = DocumentIndexer()
-                    return await idx.get_sources(), await idx.count()
-
-                sources, total = run_async(_list_sources)
-                st.metric("文档总数", len(sources))
-                st.metric("Chunk 总数", total)
-                for source in sources:
-                    st.text(f"文件：{source}")
-            except Exception as e:
-                st.warning(f"获取索引状态失败：{e}")
-
-    with col2:
-        st.subheader("分块预览")
-        chunks = st.session_state.get("_chunks", [])
-        if chunks:
-            st.caption(f"分块策略：自动选择｜共 {len(chunks)} 个分块")
-            for i, chunk in enumerate(chunks[:10]):
-                with st.expander(f"Chunk {i + 1} ({len(chunk.page_content)} 字符)", expanded=i < 3):
-                    st.text(chunk.page_content[:500])
-                    if len(chunk.page_content) > 500:
-                        st.caption(f"... 还有 {len(chunk.page_content) - 500} 个字符")
-        else:
-            st.info("上传并处理文档后，分块结果会显示在这里。")
+    return DocumentIndexer()
 
 
-elif page == PAGE_CHAT:
-    st.title("智能问答")
-    st.caption("Adaptive-RAG：查询分类 → 动态路由 → 检索 → 生成 → 审核")
+def get_session_id() -> str:
+    if "rag_session_id" not in st.session_state:
+        st.session_state.rag_session_id = f"streamlit-{uuid.uuid4()}"
+    return st.session_state.rag_session_id
 
+
+def reset_chat() -> None:
+    st.session_state.rag_session_id = f"streamlit-{uuid.uuid4()}"
+    st.session_state.chat_messages = []
+    st.session_state.last_state = None
+
+
+def value_or_dash(value: Any) -> str:
+    if value is None or value == "":
+        return "-"
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return str(value)
+
+
+def bool_label(value: Any) -> str:
+    if value is True:
+        return "是"
+    if value is False:
+        return "否"
+    return "-"
+
+
+def get_doc_content(doc: Any) -> str:
+    if hasattr(doc, "page_content"):
+        return str(doc.page_content)
+    if hasattr(doc, "content"):
+        return str(doc.content)
+    if isinstance(doc, dict):
+        return str(doc.get("page_content") or doc.get("content") or "")
+    return str(doc)
+
+
+def get_doc_metadata(doc: Any) -> dict[str, Any]:
+    if hasattr(doc, "metadata") and isinstance(doc.metadata, dict):
+        return doc.metadata
+    if isinstance(doc, dict) and isinstance(doc.get("metadata"), dict):
+        return doc["metadata"]
+    return {}
+
+
+def source_name(doc: Any) -> str:
+    metadata = get_doc_metadata(doc)
+    return str(
+        metadata.get("source_name")
+        or metadata.get("source_file")
+        or metadata.get("source")
+        or getattr(doc, "source", "")
+        or "未知来源"
+    )
+
+
+def truncate(text: str, limit: int = 600) -> str:
+    clean = " ".join(text.split())
+    if len(clean) <= limit:
+        return clean
+    return clean[:limit].rstrip() + "..."
+
+
+def refresh_index_stats() -> None:
+    try:
+        st.session_state.indexed_chunks = run_coro(get_indexer().count())
+        st.session_state.sources = run_coro(get_indexer().get_sources())
+    except Exception as exc:
+        st.session_state.index_stats_error = str(exc)
+
+
+def render_sidebar() -> None:
+    from config.settings import get_settings
+
+    settings = get_settings()
+    st.sidebar.title("Adaptive RAG")
+    st.sidebar.caption("文档问答 · 自适应路由 · LangGraph")
+
+    st.sidebar.markdown("### 会话")
+    st.sidebar.code(get_session_id(), language=None)
+    if st.sidebar.button("新建会话", use_container_width=True):
+        reset_chat()
+        st.rerun()
+    if st.sidebar.button("清空对话", use_container_width=True):
+        st.session_state.chat_messages = []
+        st.session_state.last_state = None
+        st.rerun()
+
+    st.sidebar.markdown("### 知识库")
+    if st.sidebar.button("刷新索引状态", use_container_width=True):
+        refresh_index_stats()
+    chunks = st.session_state.get("indexed_chunks")
+    sources = st.session_state.get("sources")
+    st.sidebar.metric("已索引 chunks", value_or_dash(chunks))
+    st.sidebar.metric("来源数量", value_or_dash(len(sources) if isinstance(sources, list) else None))
+
+    st.sidebar.markdown("### Langfuse")
+    has_keys = bool(settings.langfuse_public_key and settings.langfuse_secret_key)
+    st.sidebar.write("状态：" + ("已启用" if settings.langfuse_enabled and has_keys else "未启用"))
+    st.sidebar.write("地址：" + settings.langfuse_base_url)
+    st.sidebar.caption("密钥只用于后端上报，不在页面展示。")
+
+
+async def ingest_file(uploaded_file, strategy: str, chunk_size: int) -> dict[str, int | str]:
+    from src.ingestion.chunker import ChunkingStrategy, auto_chunk, chunk_documents
+    from src.ingestion.loader import load_document
+
+    suffix = Path(uploaded_file.name).suffix
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.getbuffer())
+        tmp_path = tmp.name
+
+    raw_docs = await load_document(tmp_path)
+    if strategy == "auto":
+        chunks = auto_chunk(tmp_path)
+    else:
+        chunks = chunk_documents(raw_docs, strategy=ChunkingStrategy(strategy), chunk_size=chunk_size)
+
+    count = await get_indexer().index_documents(chunks)
+    return {
+        "文件": uploaded_file.name,
+        "原始片段": len(raw_docs),
+        "分块数量": len(chunks),
+        "写入数量": count,
+    }
+
+
+def render_header() -> None:
+    st.markdown(
+        """
+        <div class="ar-hero">
+          <h1>Adaptive RAG 文档问答系统</h1>
+          <p>根据问题复杂度自动选择无需检索、单步 RAG 或多步 RAG，并在生成后执行质量审核、RAGAS 评估和安全检查。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    last_state = st.session_state.get("last_state") or {}
+    col_a, col_b, col_c, col_d = st.columns(4)
+    col_a.metric("问题复杂度", COMPLEXITY_LABELS.get(last_state.get("complexity"), value_or_dash(last_state.get("complexity"))))
+    col_b.metric("检索策略", STRATEGY_LABELS.get(last_state.get("selected_strategy"), value_or_dash(last_state.get("selected_strategy"))))
+    col_c.metric("命中文档", value_or_dash(last_state.get("search_count")))
+    col_d.metric("质量分", value_or_dash(last_state.get("quality_score")))
+
+
+def render_trace_summary(state: dict[str, Any]) -> None:
+    st.markdown("#### 本次链路")
+    if not state:
+        st.info("提交一个问题后，这里会展示路由、检索、审核和安全状态。")
+        return
+
+    rows = [
+        {"项目": "复杂度", "值": COMPLEXITY_LABELS.get(state.get("complexity"), value_or_dash(state.get("complexity")))},
+        {"项目": "分类置信度", "值": value_or_dash(state.get("complexity_confidence"))},
+        {"项目": "检索策略", "值": STRATEGY_LABELS.get(state.get("selected_strategy"), value_or_dash(state.get("selected_strategy")))},
+        {"项目": "检索命中", "值": value_or_dash(state.get("search_count"))},
+        {"项目": "缓存命中", "值": bool_label(state.get("cache_hit") or state.get("from_cache"))},
+        {"项目": "质量通过", "值": bool_label(state.get("quality_passed"))},
+        {"项目": "安全风险", "值": value_or_dash(state.get("safety_risk_level"))},
+        {"项目": "人工审核", "值": value_or_dash(state.get("hitl_status"))},
+    ]
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    summary = state.get("search_result_summary")
+    if summary:
+        with st.expander("检索摘要", expanded=False):
+            st.write(summary)
+
+    ragas_scores = state.get("ragas_scores")
+    if ragas_scores:
+        with st.expander("RAGAS 评分", expanded=False):
+            st.json(ragas_scores)
+
+
+def render_retrieved_docs(state: dict[str, Any]) -> None:
+    docs = state.get("retrieved_docs") or []
+    st.markdown("#### 参考来源")
+    if not docs:
+        st.caption("本次回答没有返回检索文档。")
+        return
+
+    for index, doc in enumerate(docs[:8], start=1):
+        title = f"{index}. {source_name(doc)}"
+        with st.expander(title, expanded=index <= 2):
+            metadata = get_doc_metadata(doc)
+            if metadata:
+                tags = []
+                for key in ["document_id", "page", "chunk_id", "score", "source"]:
+                    if metadata.get(key) is not None:
+                        tags.append(f"<span class='ar-pill'>{key}: {metadata.get(key)}</span>")
+                if tags:
+                    st.markdown("".join(tags), unsafe_allow_html=True)
+            st.markdown(f"<div class='ar-source'>{truncate(get_doc_content(doc), 900)}</div>", unsafe_allow_html=True)
+
+
+def render_chat_tab() -> None:
     if "chat_messages" not in st.session_state:
         st.session_state.chat_messages = []
 
-    col_chat, col_viz = st.columns([3, 2])
+    left, right = st.columns([2.15, 1], gap="large")
+    with left:
+        st.subheader("问答")
+        st.caption("输入问题后，系统会自动判断是否需要检索以及采用哪种 RAG 路径。")
 
-    with col_chat:
-        st.subheader("对话")
+        if not st.session_state.chat_messages:
+            samples = [
+                "这个项目的 Adaptive RAG 流程是怎样的？",
+                "请总结已索引文档的主要内容。",
+                "哪些问题适合走多步检索？",
+            ]
+            sample_cols = st.columns(len(samples))
+            for col, sample in zip(sample_cols, samples):
+                if col.button(sample, use_container_width=True):
+                    st.session_state.pending_query = sample
+                    st.rerun()
 
-        for msg in st.session_state.chat_messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+        for message in st.session_state.chat_messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-        query = st.chat_input("输入你的问题...")
+        query = st.chat_input("输入你的问题")
+        query = query or st.session_state.pop("pending_query", None)
         if query:
-            retrieval_filter = current_retrieval_filter()
-            if retrieval_filter is None:
-                st.warning("请先在“文档管理”页上传并处理文档，再进行智能问答。")
-                st.stop()
-
             st.session_state.chat_messages.append({"role": "user", "content": query})
-
             with st.chat_message("user"):
                 st.markdown(query)
 
             with st.chat_message("assistant"):
-                with st.spinner("正在分析问题复杂度..."):
-                    try:
-                        from src.graph.state import GraphState
-                        from src.graph.workflow import build_adaptive_rag_graph
+                with st.spinner("正在分析问题、检索文档并生成回答..."):
+                    from src.graph.workflow import run_adaptive_rag
 
-                        session_id = st.session_state["_rag_session_id"]
-                        initial_state: GraphState = {
-                            "query": query,
-                            "session_id": session_id,
-                            "retrieval_filter": retrieval_filter,
-                        }
+                    final_state = run_coro(run_adaptive_rag(query, session_id=get_session_id()))
+                    answer = (
+                        final_state.get("final_response")
+                        or final_state.get("generated_answer")
+                        or "没有生成可展示的回答。"
+                    )
+                    st.markdown(answer)
 
-                        try:
-                            answer, final_state = _write_streaming_answer(
-                                query,
-                                session_id,
-                                retrieval_filter,
-                            )
-                        except Exception:
-                            app = build_adaptive_rag_graph()
-                            final_state = run_async(
-                                app.ainvoke,
-                                initial_state,
-                                {"configurable": {"thread_id": session_id}},
-                            )
-                            answer = final_state.get("generated_answer", "回答生成失败。")
-                            answer = st.write_stream(_stream_text(answer)) or answer
+            st.session_state.chat_messages.append({"role": "assistant", "content": answer})
+            st.session_state.last_state = final_state
+            st.rerun()
 
-                        st.session_state.chat_messages.append({
-                            "role": "assistant",
-                            "content": answer,
-                        })
-
-                        st.session_state["_last_complexity"] = final_state.get("complexity", "N/A")
-                        st.session_state["_last_confidence"] = final_state.get("complexity_confidence", 0)
-                        st.session_state["_last_strategy"] = final_state.get("selected_strategy", "N/A")
-                        st.session_state["_last_docs"] = final_state.get("retrieved_docs", [])
-                        st.session_state["_last_quality"] = final_state.get("quality_score", 0)
-                        st.session_state["_last_hallucination"] = final_state.get("quality_passed", True)
-                        st.session_state["_last_hyde"] = final_state.get("hyde_hypothesis", "")
-                    except Exception as e:
-                        st.error(f"执行失败：{e}")
-                        import traceback
-
-                        st.code(traceback.format_exc())
-
-    with col_viz:
-        st.subheader("检索过程可视化")
-
-        with st.container(border=True):
-            st.caption("查询复杂度")
-            complexity = st.session_state.get("_last_complexity", "-")
-            confidence = st.session_state.get("_last_confidence", 0)
-            strategy = st.session_state.get("_last_strategy", "-")
-
-            color_map = {"simple": "简单", "medium": "中等", "complex": "复杂"}
-            st.metric("复杂度", f"{color_map.get(complexity, complexity)}")
-            st.metric("置信度", f"{confidence:.2f}")
-            st.metric("选择策略", strategy)
-
-        with st.container(border=True):
-            st.caption("HyDE 假设文档")
-            hyde = st.session_state.get("_last_hyde", "")
-            if hyde:
-                st.text(hyde[:300] + ("..." if len(hyde) > 300 else ""))
-            else:
-                st.caption("未触发，或简单查询跳过。")
-
-        with st.container(border=True):
-            st.caption("检索结果（Top 3）")
-            docs = st.session_state.get("_last_docs", [])
-            if docs:
-                for i, doc in enumerate(docs[:3], 1):
-                    st.text(f"Doc {i}: {doc.content[:100]}... (得分：{doc.score:.2f})")
-            else:
-                st.caption("无检索，或直接回答模式。")
-
-        with st.container(border=True):
-            st.caption("安全与质量")
-            quality = st.session_state.get("_last_quality", 0)
-            passed = st.session_state.get("_last_hallucination", True)
-            st.metric("质量得分", f"{quality:.2f}")
-            st.metric("审核结果", "通过" if passed else "需要人工审核")
+    with right:
+        state = st.session_state.get("last_state") or {}
+        render_trace_summary(state)
+        render_retrieved_docs(state)
 
 
-elif page == PAGE_COMPARE:
-    st.title("对比评估")
-    st.caption("同一查询并行运行三条路径，并用 RAGAS 指标量化对比。")
+def render_documents_tab() -> None:
+    st.subheader("文档摄入")
+    st.caption("上传本地文档后写入向量索引，后续问答会基于这些内容检索。")
 
-    eval_query = st.text_area(
-        "输入测试查询",
-        placeholder="例如：2024 年 Q3 营收增长的主要驱动因素是什么？",
+    uploaded_files = st.file_uploader(
+        "上传文档",
+        type=["txt", "md", "pdf", "docx", "csv"],
+        accept_multiple_files=True,
     )
-    ground_truth = st.text_area(
-        "标准答案（可选）",
-        placeholder="填写后会额外评估上下文精确度和召回率；不填写时这些指标显示为未评估。",
-    )
+    col_strategy, col_size = st.columns([1, 1])
+    with col_strategy:
+        strategy = st.selectbox(
+            "分块策略",
+            ["auto", "recursive", "markdown", "semantic"],
+            format_func=lambda value: {
+                "auto": "自动选择",
+                "recursive": "递归字符分块",
+                "markdown": "Markdown 结构分块",
+                "semantic": "语义分块",
+            }.get(value, value),
+        )
+    with col_size:
+        chunk_size = st.number_input("分块大小", min_value=200, max_value=4000, value=800, step=100)
 
-    if st.button("执行三路对比", type="primary", disabled=not eval_query):
-        retrieval_filter = current_retrieval_filter()
-        if retrieval_filter is None:
-            st.warning("请先在“文档管理”页上传并处理文档，再执行三路对比。")
-            st.stop()
+    if st.button("开始处理文档", type="primary", disabled=not uploaded_files):
+        results: list[dict[str, Any]] = []
+        progress = st.progress(0)
+        for index, uploaded_file in enumerate(uploaded_files or [], start=1):
+            with st.status(f"正在处理 {uploaded_file.name}", expanded=False):
+                results.append(run_coro(ingest_file(uploaded_file, strategy, int(chunk_size))))
+            progress.progress(index / len(uploaded_files))
+        st.success("文档索引完成")
+        st.dataframe(results, use_container_width=True, hide_index=True)
+        refresh_index_stats()
 
-        with st.spinner("正在并行执行三条路径..."):
-            try:
-                from src.evaluation.compare import run_comparison
+    st.divider()
+    col_refresh, col_info = st.columns([1, 3])
+    with col_refresh:
+        if st.button("刷新来源列表", use_container_width=True):
+            refresh_index_stats()
+    with col_info:
+        error = st.session_state.get("index_stats_error")
+        if error:
+            st.warning(error)
 
-                result = run_async(
-                    run_comparison,
-                    eval_query,
-                    ground_truth.strip() or None,
-                    None,
-                    retrieval_filter,
-                )
-                st.session_state["_compare_result"] = result
-                st.success("对比完成。")
-            except Exception as e:
-                st.error(f"对比执行失败：{e}")
-
-    result = st.session_state.get("_compare_result")
-    if result:
-        col1, col2, col3 = st.columns(3)
-
-        direct = result.direct_answer
-        rag = result.standard_rag
-        adaptive = result.adaptive_rag
-
-        with col1:
-            st.subheader("直接回答")
-            st.caption("无检索，仅 LLM")
-            with st.container(border=True):
-                st.metric("耗时", f"{direct.get('time_ms', 0):.0f}ms")
-                st.metric("Token", direct.get("tokens_est", 0))
-            with st.expander("查看答案"):
-                st.text(direct.get("answer", "")[:500])
-
-        with col2:
-            st.subheader("标准 RAG")
-            st.caption("单步 BM25 + Dense + Rerank")
-            with st.container(border=True):
-                scores = rag.get("scores")
-                if rag.get("eval_error"):
-                    st.warning(f"评估失败：{rag['eval_error']}")
-                render_ragas_score(scores, "faithfulness", "忠实度")
-                render_ragas_score(scores, "answer_relevancy", "相关性")
-                render_ragas_score(scores, "context_precision", "精确度")
-                st.metric("耗时", f"{rag.get('time_ms', 0):.0f}ms")
-                st.caption("来源：" + (", ".join(rag.get("retrieved_sources") or []) or "未检索到"))
-            with st.expander("查看答案"):
-                st.text(rag.get("answer", "")[:500])
-
-        with col3:
-            st.subheader("自适应 RAG")
-            st.caption(f"策略：{adaptive.get('strategy', 'N/A')}")
-            with st.container(border=True):
-                scores = adaptive.get("scores")
-                if adaptive.get("eval_error"):
-                    st.warning(f"评估失败：{adaptive['eval_error']}")
-                render_ragas_score(scores, "faithfulness", "忠实度")
-                render_ragas_score(scores, "answer_relevancy", "相关性")
-                render_ragas_score(scores, "context_precision", "精确度")
-                st.metric("耗时", f"{adaptive.get('time_ms', 0):.0f}ms")
-                st.caption("来源：" + (", ".join(adaptive.get("retrieved_sources") or []) or "未检索到"))
-            with st.expander("查看答案"):
-                st.text(adaptive.get("answer", "")[:500])
-
-        st.divider()
-        st.markdown(result.conclusion)
+    sources = st.session_state.get("sources")
+    if sources is not None:
+        st.metric("已索引 chunks", st.session_state.get("indexed_chunks", 0))
+        st.dataframe([{"文档来源": source} for source in sources], use_container_width=True, hide_index=True)
 
 
-elif page == PAGE_MONITOR:
-    st.title("系统监控")
-    st.caption("熔断器状态、Token 消耗、缓存统计和性能指标。")
+def render_evaluation_tab() -> None:
+    st.subheader("三路对比评估")
+    st.caption("对同一问题同时运行直接回答、标准 RAG 和 Adaptive RAG，比较耗时、召回和评估分。")
 
-    col1, col2 = st.columns(2)
+    query = st.text_area("评估问题", height=110, placeholder="输入一个需要比较的测试问题")
+    ground_truth = st.text_area("参考答案，可选", height=80, placeholder="如果有标准答案，可以填在这里用于 RAGAS 评估")
 
-    with col1:
-        st.subheader("熔断器状态")
-        try:
-            from src.safety.circuit_breaker import FrequencyCircuitBreaker, QualityCircuitBreaker
+    if st.button("运行对比", type="primary", disabled=not query.strip()):
+        from src.evaluation.compare import run_comparison
 
-            qcb = QualityCircuitBreaker()
-            fcb = FrequencyCircuitBreaker()
+        with st.spinner("正在运行三路对比..."):
+            result = run_coro(run_comparison(query.strip(), ground_truth=ground_truth.strip() or None))
 
-            with st.container(border=True):
-                st.caption("质量熔断（滑动窗口）")
-                qstats = qcb.stats()
-                st.metric("状态", qstats["state"].upper())
-                st.progress(
-                    1 - float(qstats["window_failure_rate"].rstrip("%")) / 100,
-                    text=f"失败率：{qstats['window_failure_rate']}",
-                )
-                st.caption(
-                    f"窗口：{qstats['total_in_window']}/{qstats['window_size']} | "
-                    f"阈值：{qstats['threshold']}"
-                )
+        st.markdown("#### 评估结论")
+        st.write(result.conclusion)
 
-            with st.container(border=True):
-                st.caption("频率熔断（令牌桶）")
-                fstats = fcb.stats()
-                st.metric("状态", fstats["state"].upper())
-                st.metric("可用令牌", fstats["tokens_available"])
-                st.caption(f"速率：{fstats['refill_rate']} | 上限：{fstats['max_tokens']}")
-        except Exception as e:
-            st.warning(f"熔断器状态获取失败：{e}")
+        rows = []
+        for name, payload in [
+            ("直接回答", result.direct_answer),
+            ("标准 RAG", result.standard_rag),
+            ("Adaptive RAG", result.adaptive_rag),
+        ]:
+            scores = payload.get("scores") or {}
+            rows.append({
+                "路径": name,
+                "耗时 ms": round(payload.get("time_ms") or 0, 1),
+                "模型": payload.get("model"),
+                "文档数": payload.get("docs_count"),
+                "Token 估算": payload.get("tokens_est"),
+                "Faithfulness": scores.get("faithfulness"),
+                "Answer Relevancy": scores.get("answer_relevancy"),
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
 
-    with col2:
-        st.subheader("Token 消耗")
-        try:
-            from src.utils.observability import get_perf_tracker, get_token_tracker
-
-            token_tracker = get_token_tracker()
-            perf_tracker = get_perf_tracker()
-
-            with st.container(border=True):
-                tokens = token_tracker.stats
-                by_step = token_tracker.by_step()
-                st.metric("总 Token", tokens["total_tokens"])
-                st.metric("请求次数", tokens["requests_count"])
-                if by_step:
-                    for step, count in sorted(by_step.items()):
-                        st.metric(f"{step}", f"{count} tokens")
-                else:
-                    st.caption("暂无数据")
-
-            with st.container(border=True):
-                perf = perf_tracker.stats()
-                if perf:
-                    for name, stat in sorted(perf.items()):
-                        st.metric(
-                            f"{name}",
-                            f"avg={stat['avg_ms']:.0f}ms (x{stat['count']})",
-                        )
-                else:
-                    st.caption("暂无数据")
-        except Exception as e:
-            st.warning(f"监控数据获取失败：{e}")
-
-    st.subheader("缓存统计")
-    try:
-        st.caption("语义缓存：精确匹配 + 余弦相似度")
-        st.info("缓存统计可通过 SemanticCache().stats() 获取。")
-    except Exception as e:
-        st.warning(f"缓存统计获取失败：{e}")
+        answer_tabs = st.tabs(["直接回答", "标准 RAG", "Adaptive RAG"])
+        for tab, payload in zip(answer_tabs, [result.direct_answer, result.standard_rag, result.adaptive_rag]):
+            with tab:
+                st.markdown(payload.get("answer") or "-")
+                if payload.get("retrieved_sources"):
+                    st.caption("来源：" + ", ".join(payload["retrieved_sources"]))
+                if payload.get("eval_error"):
+                    st.warning(payload["eval_error"])
 
 
-elif page == PAGE_MEMORY:
-    st.title("记忆管理")
-    st.caption("三级记忆系统：短期会话、中期偏好、长期知识。")
+def render_diagnostics_tab() -> None:
+    st.subheader("运行诊断")
+    from config.settings import get_settings
+    from src.utils.observability import get_perf_tracker, get_token_tracker
 
-    col1, col2, col3 = st.columns(3)
+    settings = get_settings()
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Langfuse", "已启用" if settings.langfuse_enabled and settings.langfuse_public_key and settings.langfuse_secret_key else "未启用")
+    col_b.metric("Base URL", settings.langfuse_base_url)
+    col_c.metric("会话", get_session_id().split("-", 1)[0])
 
-    with col1:
-        st.subheader("短期记忆")
-        st.caption("当前会话内的多轮上下文")
-        with st.container(border=True):
-            chat_msgs = st.session_state.get("chat_messages", [])
-            if chat_msgs:
-                st.metric("对话轮数", len(chat_msgs) // 2)
-                for i, msg in enumerate(chat_msgs[-6:]):
-                    role = "用户" if msg["role"] == "user" else "助手"
-                    st.text(f"[{i + 1}] {role}: {msg['content'][:80]}...")
-            else:
-                st.caption("暂无对话。请到智能问答页面提问。")
-        st.caption("配置：最多保留 10 轮；窗口管理：滑动窗口。")
-
-    with col2:
-        st.subheader("中期记忆")
-        st.caption("跨会话的用户偏好学习")
-        with st.container(border=True):
-            try:
-                from src.memory.medium_term import MediumTermMemory
-
-                mm = MediumTermMemory()
-                prefs = mm.get_preferences("default")
-
-                st.metric("偏好风格", prefs.preferred_style)
-                if prefs.preferred_topics:
-                    for topic in prefs.preferred_topics:
-                        st.text(f"- {topic}")
-                else:
-                    st.caption("尚未学习到偏好。")
-
-                if prefs.frequently_asked:
-                    st.caption("常用查询：")
-                    for q in prefs.frequently_asked[:3]:
-                        st.text(f"- {q}")
-            except Exception as e:
-                st.caption(f"数据库未初始化：{e}")
-        st.caption("存储：SQLite；更新：会话结束后提取。")
-
-    with col3:
-        st.subheader("长期记忆")
-        st.caption("持久化知识摘要")
-        with st.container(border=True):
-            try:
-                from src.memory.long_term import LongTermMemory
-
-                lm = LongTermMemory()
-                if lm.count > 0:
-                    st.metric("记忆条目", lm.count)
-                    for entry in lm.get_all()[:3]:
-                        with st.expander(f"记忆（重要性 {entry.importance:.2f}）"):
-                            st.text(entry.content[:300])
-                else:
-                    st.caption("暂无条目。")
-            except Exception as e:
-                st.caption(f"未初始化：{e}")
-        st.caption("触发：上下文超过阈值；存储：向量数据库。")
+    diag_tabs = st.tabs(["性能", "Token", "最近状态"])
+    with diag_tabs[0]:
+        st.json(get_perf_tracker().stats())
+    with diag_tabs[1]:
+        st.json(get_token_tracker().stats)
+    with diag_tabs[2]:
+        state = st.session_state.get("last_state") or {}
+        st.json({key: value for key, value in state.items() if key not in {"retrieved_docs", "messages"}})
 
 
-st.sidebar.divider()
-st.sidebar.info(
-    "**启动命令**：`streamlit run ui/app.py` 或 `python main.py ui`\n\n"
-    "**技术论文**：\n"
-    "- Adaptive-RAG (NAACL 2024)\n"
-    "- HyDE (Gao et al., 2022)\n\n"
-    "**WeKnora 参考**：Tencent/WeKnora"
-)
+def main() -> None:
+    render_sidebar()
+    render_header()
+
+    tab_chat, tab_docs, tab_eval, tab_diag = st.tabs(["问答", "文档", "评估", "诊断"])
+    with tab_chat:
+        render_chat_tab()
+    with tab_docs:
+        render_documents_tab()
+    with tab_eval:
+        render_evaluation_tab()
+    with tab_diag:
+        render_diagnostics_tab()
+
+
+main()

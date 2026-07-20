@@ -39,6 +39,20 @@ class Settings(BaseSettings):
         case_sensitive=False, # 环境变量名大小写不敏感
     )
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        # Project-local .env should win over machine-level environment
+        # variables. This prevents stale global EMBEDDING_API_KEY/RERANK_API_KEY
+        # values from silently overriding the key configured for this project.
+        return init_settings, dotenv_settings, env_settings, file_secret_settings
+
     # ================================================================
     # LLM 配置 (OpenAI 兼容协议)
     # ← WeKnora: config/config.yaml conversation 段
@@ -79,6 +93,14 @@ class Settings(BaseSettings):
         default="",
         description="安全检测专用模型（空字符串 = 复用 llm_default_model）",
     )
+    safety_base_url: str = Field(
+        default="",
+        description="安全检测专用 Base URL（空字符串 = 复用 llm_base_url）",
+    )
+    safety_api_key: str = Field(
+        default="",
+        description="安全检测专用 API Key（空字符串 = 复用 llm_api_key）",
+    )
 
     llm_temperature: float = 0.3
     llm_max_tokens: int = 4096
@@ -104,28 +126,45 @@ class Settings(BaseSettings):
     # provider=openai: 使用 OpenAI 兼容 Embedding API
     #                  需要配置 EMBEDDING_BASE_URL / EMBEDDING_API_KEY
     # ================================================================
-    embedding_provider: str = "local"
-    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    embedding_dimensions: int = 1536
+    embedding_provider: str = "openai"
+    embedding_model: str = "text-embedding-v4"
+    embedding_dimensions: int = 1024
+    embedding_batch_size: int = 10
 
     # 仅当 EMBEDDING_PROVIDER=openai 时使用以下配置
     # embedding_api_key 为空时自动回退使用 LLM_API_KEY
     embedding_base_url: str = Field(
-        default="https://api.openai.com/v1",
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
         description="Embedding API Base URL（独立于 LLM_BASE_URL，防止 Chat 和 Embedding 混用）",
     )
     embedding_api_key: str = Field(
         default="",
+        validation_alias=AliasChoices("embedding_api_key", "dashscope_api_key"),
         description="Embedding API Key（为空时自动复用 LLM_API_KEY）",
+    )
+    dashscope_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("dashscope_api_key"),
+        description="DashScope API Key shared by embedding and rerank.",
     )
 
     # ================================================================
     # Rerank 重排序 ← WeKnora: chat_pipeline/rerank.go
     # ================================================================
     rerank_enabled: bool = True
-    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    rerank_top_k: int = 5
-    rerank_threshold: float = 0.3
+    rerank_provider: str = "dashscope"
+    rerank_model: str = "qwen3-rerank"
+    rerank_base_url: str = "https://dashscope.aliyuncs.com/compatible-api/v1/reranks"
+    rerank_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("rerank_api_key", "dashscope_api_key"),
+        description="Rerank API Key. Falls back to EMBEDDING_API_KEY when empty.",
+    )
+    rerank_candidate_top_k: int = 20
+    rerank_top_k: int = 6
+    rerank_threshold: float = 0.0
+    rerank_instruct: str = "Given a web search query, retrieve relevant passages that answer the query."
+    rerank_timeout: int = 30
 
     # ================================================================
     # 向量数据库 ← WeKnora: 多向量库后端 → ChromaDB
@@ -137,8 +176,9 @@ class Settings(BaseSettings):
     # 检索参数 ← WeKnora: chat_manage.go 中的 VectorThreshold 等
     # ================================================================
     retrieval_top_k: int = 10
-    retrieval_threshold: float = 0.3
-    bm25_top_k: int = 5
+    retrieval_threshold: float = 0.0
+    bm25_top_k: int = 10
+    dense_top_k: int = 40
 
     # ================================================================
     # Document chunking
@@ -207,6 +247,18 @@ class Settings(BaseSettings):
     langsmith_endpoint: str = "https://api.smith.langchain.com"
 
     # ================================================================
+    # Langfuse 可观测性
+    # ================================================================
+    langfuse_enabled: bool = True
+    langfuse_secret_key: str = ""
+    langfuse_public_key: str = ""
+    langfuse_base_url: str = Field(
+        default="http://localhost:3000",
+        validation_alias=AliasChoices("langfuse_base_url", "langfuse_host"),
+        description="Langfuse base URL / host",
+    )
+
+    # ================================================================
     # 服务配置
     # ================================================================
     host: str = "0.0.0.0"
@@ -221,6 +273,30 @@ class Settings(BaseSettings):
     prompts_dir: Path = PROJECT_ROOT / "config" / "prompts"
     samples_dir: Path = PROJECT_ROOT / "samples"
     data_dir: Path = PROJECT_ROOT / "data"
+
+    # ================================================================
+    # ★ 优化开关（可独立回滚，默认全部开启）
+    # ================================================================
+    opt_classify_rules_expanded: bool = Field(
+        default=True,
+        description="分类规则扩展：扩大正则覆盖以减少 LLM 分类调用",
+    )
+    opt_input_safety_prescreen: bool = Field(
+        default=True,
+        description="输入安全预筛：正则预筛安全查询，跳过 LLM 安全检测",
+    )
+    opt_output_safety_domain_skip: bool = Field(
+        default=True,
+        description="输出安全域跳过：文档 QA 领域查询跳过 LLM 输出安全检测",
+    )
+    opt_review_fast_path: bool = Field(
+        default=True,
+        description="审核快速通道：高置信度 medium 查询跳过 LLM 质量审核",
+    )
+    opt_sufficiency_heuristic: bool = Field(
+        default=True,
+        description="充分性启发式预检：首轮检索用规则判断是否充分",
+    )
 
 
 @lru_cache

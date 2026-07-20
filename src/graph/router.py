@@ -33,49 +33,83 @@ logger = logging.getLogger(__name__)
 RouteTarget = Literal["no_retrieval", "single_step", "multi_step"]
 
 SIMPLE_PATTERNS = [
-    r"^(你好|您好|hi|hello)[\s!！。.,，]*$",
-    r"^(谢谢|感谢|thanks)[\s!！。.,，]*$",
-    r"^什么是\S+[？?]?$",
-    r"^\S+是什么[？?]?$",
-    r"^(帮助|help|怎么用|使用说明)[？?]?$",
+    r"^(你好|您好|hi|hello|hey)[\s!！。.,，]*$",
+    r"^(谢谢|感谢|thanks|thank\s*you)[\s!！。.,，]*$",
+    r"^什么是\s*\S+[？?]?$",
+    r"^\S+\s*是什么[？?]?$",
+    r"^(帮助|help|怎么用|使用说明|功能|能做什么)[？?]?$",
+    # ★ 新增：翻译/换算/纯知识问答
+    r"^(翻译|translate)\s",
+    r"^(今天|明天|昨天|现在|当前).*(日期|时间|天气)",
+    r"^(计算|算一下|等于|换算)\s",
 ]
 
 COMPLEX_PATTERNS = [
-    r"(比较|对比|区别|vs\.?|和.*有什么.*不同)",
-    r"(为什么|原因|原理|如何实现|怎么做到)",
-    r"(分析|评估|总结|概括|归纳)",
+    r"(比较|对比|区别|vs\.?|和.*有什么.*不同|差异)",
+    r"(为什么|原因|原理|如何实现|怎么做到|怎么会|为何)",
+    r"(分析|评估|总结|概括|归纳|梳理|复盘)",
+    # ★ 新增：多跳推理 / 条件推理
+    r"(如果|假如|假设|要是).*(会|怎么|如何|怎么办|会怎样)",
+    r"(基于|根据).*(分析|判断|推断|预测|建议)",
+    r"(关系|关联|影响|导致|造成|引起)",
+    r"(优点|缺点|优劣|利弊|风险|机会|挑战)",
 ]
 
 COMPLEX_DIAGNOSTIC_PATTERNS = [
-    r"(异常|矛盾|不一致|到底|是否正常|有没有.*问题)",
-    r"(延期|延迟).*(原因|异常|问题|状态)",
+    r"(异常|矛盾|不一致|到底|是否正常|有没有.*问题|怎么回事|什么情况)",
+    r"(延期|延迟|滞后|落后|超出).*(原因|异常|问题|状态)",
+    # ★ 新增：排错/诊断类
+    r"(报错|错误|失败|崩溃|挂了|不行|不能用|出问题了)",
+    r"(检查|排查|诊断|定位).*(问题|原因|错误|异常)",
 ]
 
 IMPLICIT_INFERENCE_PATTERNS = [
-    r"(谁|哪位|哪个人).*(可能|适合|抽调|支援|帮忙|候选)",
-    r"(如果|假如).*(需要|紧急|支援|加人)",
+    r"(谁|哪位|哪个人).*(可能|适合|抽调|支援|帮忙|候选|推荐|胜任)",
+    r"(如果|假如).*(需要|紧急|支援|加人|调配)",
     r"(为什么|原因).*(可能|适合|推荐)",
+    # ★ 新增：资源调配决策
+    r"(哪个|哪些).*(人|人员|部门|团队).*(合适|可以|能|擅长)",
+    r"(建议|推荐).*(谁|哪|人选|方案|做法)",
 ]
 
 
 AGGREGATE_PATTERNS = [
-    r"(总共|合计|总和|总预算|总支出|总人数|一共)",
-    r"(最多|最少|最高|最低|最大|最小).*(?:项目|部门|人|金额|预算|支出)",
-    r"(剩余|结余|余额).*(?:最多|最少|哪个|什么)",
+    r"(总共|合计|总和|总预算|总支出|总人数|一共|共计)",
+    r"(最多|最少|最高|最低|最大|最小).*(?:项目|部门|人|金额|预算|支出|数值)",
+    r"(剩余|结余|余额).*(?:最多|最少|哪个|什么|多少)",
     r"(平均|均值|人均)",
+    # ★ 新增：排名/排序
+    r"(排名|排行|TOP|top|前\d+|第[一二三四五六七八九十])",
 ]
 
 LOW_COST_RETRIEVAL_PATTERNS = [
-    r"(预算|支出|技术栈|负责人|部门|状态|来源).*(多少|什么|哪个|是谁)",
+    r"(预算|支出|技术栈|负责人|部门|状态|来源|进度|截止).*(多少|什么|哪个|是谁|如何|怎样)",
     r"(有多少|多少个|几个|哪些|分别).*(项目|部门|人员|成员)",
     r"(列出|列举).*(所有|全部)?\s*(项目|部门|人员|成员)",
+    # ★ 新增：查询单条记录
+    r"(查|查一下|查询|看看|看一下|告诉我).*\S{2,10}(?:的|项目)",
+    r"^(?:什么是|啥是)\S",
 ]
 
 SINGLE_FACT_PATTERNS = [
-    r"^(?:\S{1,20})项目的?(?:预算|支出|技术栈|负责人|部门|状态)是(?:多少|什么|谁|哪个).*[？?]?$",
+    r"^(?:\S{1,20})项目的?(?:预算|支出|技术栈|负责人|部门|状态|进度)是(?:多少|什么|谁|哪个|如何).*[？?]?$",
     r"^(?:\S{1,20})项目.*(?:预算|支出).*(?:多少).*[？?]?$",
     r"^(?:\S{1,20})项目.*技术栈.*(?:什么|为什么选择).*[？?]?$",
-    r"^(?:\S{1,20})(?:属于哪个部门|负责人是谁).*[？?]?$",
+    r"^(?:\S{1,20})(?:属于哪个部门|负责人是谁|进展如何).*[？?]?$",
+    # ★ 新增：时间和截止日期查询
+    r"^(?:\S{1,20})项目.*(?:什么时候|何时|截止|交付|上线|发布).*[？?]?$",
+    r"^(?:\S{1,20})的?(?:截止日期|交付时间|上线时间|发布时间).*[？?]?$",
+]
+
+# ★ 新增：明确的中等复杂度模式（减少 None 回退到 LLM 的概率）
+MEDIUM_DEFAULT_PATTERNS = [
+    # 具体数值/事实询问
+    r"(多少|几个|什么|哪个|谁|何时|什么时候|在哪里|怎么|如何).*[？?]?$",
+    # 单一实体信息查询
+    r"^(?:\S{1,30})的?(?:介绍|说明|概况|情况|信息|详情).*[？?]?$",
+    r"^(?:介绍|说明)一下\S",
+    # 简单 yes/no 问题
+    r"^(?:是否|是不是|有没有|能不能|可不可以|对不对).*[？?]?$",
 ]
 
 
@@ -140,11 +174,16 @@ def is_list_aggregation_query(query: str) -> bool:
 
 
 def quick_classify(query: str) -> Optional[str]:
-    """Return simple/complex for obvious queries, otherwise None."""
+    """Return simple/medium/complex for obvious queries, otherwise None (→ LLM).
+
+    ★ 优化：扩展规则覆盖后，预计 80-90% 查询被规则命中，仅约 10-20%
+    真正需要 LLM 分类的歧义查询才走 classify_query 的 LLM 调用。
+    """
     normalized = (query or "").strip()
     if not normalized:
         return "simple"
 
+    # ---- 高优先级：显式特征匹配 ----
     if is_aggregate_query(normalized):
         return "medium"
     if is_implicit_inference_query(normalized):
@@ -154,14 +193,32 @@ def quick_classify(query: str) -> Optional[str]:
     if is_single_fact_query(normalized):
         return "medium"
 
+    # ---- 简单寒暄/元问题 ----
     for pattern in SIMPLE_PATTERNS:
         if re.search(pattern, normalized, re.IGNORECASE):
             return "simple"
+
+    # ---- 复杂诊断/分析 ----
     if is_complex_diagnostic_query(normalized):
         return "complex"
     for pattern in COMPLEX_PATTERNS:
         if re.search(pattern, normalized, re.IGNORECASE):
             return "complex"
+
+    # ---- ★ 新增：中等复杂度兜底 ----
+    # 大多数文档 QA 查询是事实查询 → 默认 medium
+    # 只有少数真正歧义的查询才需要走 LLM
+    if get_settings().opt_classify_rules_expanded:
+        for pattern in MEDIUM_DEFAULT_PATTERNS:
+            if re.search(pattern, normalized, re.IGNORECASE):
+                return "medium"
+
+        # ★ 最后的兜底：查询长度和复杂度启发式
+        # 短查询（≤15 字符）大概率是简单事实查询 → medium
+        if len(normalized) <= 15:
+            return "medium"
+
+    # 只有长查询且无法匹配任何规则时才回退 LLM
     return None
 
 

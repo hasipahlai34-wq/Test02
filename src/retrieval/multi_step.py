@@ -292,6 +292,71 @@ class MultiStepStrategy(RetrievalStrategy):
         self._hyde = HyDEGenerator(llm_client=self._llm)
 
     # ----------------------------------------------------------------
+    # ★ 优化：充分性启发式预检（不调用 LLM）
+    # ----------------------------------------------------------------
+
+    def _quick_sufficiency_check(
+        self,
+        query: str,
+        documents: list[Document],
+    ) -> bool | None:
+        """对检索结果做启发式充分性预检。
+
+        Returns:
+            True  → 明显充分，跳过 LLM 评估
+            False → 明显不充分，直接进入改写重检
+            None  → 不确定，需要 LLM 评估
+        """
+        if not documents:
+            return False
+
+        # 启发式 1：去重文档数
+        seen: set[str] = set()
+        for doc in documents:
+            seen.add(getattr(doc, "content", "")[:100])
+        unique_count = len(seen)
+        if unique_count >= 5:
+            pass  # 覆盖多维度
+        elif unique_count <= 1:
+            return False
+
+        # 启发式 2：高分段文档数
+        high_score = [
+            d for d in documents
+            if float(getattr(d, "score", 0) or 0) >= 0.5
+        ]
+        if len(high_score) >= 3:
+            pass
+        elif len(high_score) == 0:
+            return False
+
+        # 启发式 3：内容总量
+        total_chars = sum(
+            len(getattr(d, "content", "") or "") for d in documents
+        )
+        if total_chars < 300:
+            return False
+
+        # 启发式 4：关键词覆盖率
+        query_keywords = set(
+            w for w in re.findall(r"[一-鿿\w]{2,}", query.lower())
+            if w not in ("什么", "怎么", "如何", "为什么", "多少", "哪些", "哪个")
+        )
+        if query_keywords:
+            all_content = " ".join(
+                getattr(d, "content", "") or "" for d in documents
+            ).lower()
+            covered = sum(1 for kw in query_keywords if kw in all_content)
+            if covered / len(query_keywords) < 0.4:
+                return False
+
+        logger.info(
+            "[multi_step] 启发式预检通过: unique=%d high_score=%d chars=%d → 判定充分",
+            unique_count, len(high_score), total_chars,
+        )
+        return True
+
+    # ----------------------------------------------------------------
     # 检索质量评估 (LLM 判断当前检索结果是否充分)
     # ----------------------------------------------------------------
 
@@ -573,8 +638,21 @@ class MultiStepStrategy(RetrievalStrategy):
 
         # Step 2-4: iterative retrieval loop keeps the existing sufficiency semantics.
         current_query = query
+        suggestion = ""
         for iteration in range(1, MAX_ITERATIONS + 1):
             if iteration == 1:
+                # ★ 优化：首轮先尝试启发式预检
+                if get_settings().opt_sufficiency_heuristic:
+                    quick_result = self._quick_sufficiency_check(query, all_documents)
+                    if quick_result is True:
+                        logger.info("  启发式预检: 充分 ✓，跳过 LLM 评估")
+                        break
+                    elif quick_result is False:
+                        logger.info("  启发式预检: 不充分 ✗，直接进入改写重检")
+                        if iteration < MAX_ITERATIONS:
+                            continue  # 跳过 LLM，直接用 query 进入下一轮
+                    # quick_result is None → 走下面的 LLM 评估
+
                 sufficient, suggestion = await self._evaluate_sufficiency(
                     query, all_documents,
                 )

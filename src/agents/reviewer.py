@@ -30,6 +30,44 @@ from src.utils.prompt_loader import load_prompt
 logger = logging.getLogger(__name__)
 
 
+def _select_review_docs(docs: list[Document], limit: int = 12) -> list[Document]:
+    """Pick evidence-rich documents for answer review.
+
+    Structure-aware retrieval may return outline/heading chunks before section
+    chunks. Reviewing only the first few chunks can therefore miss the actual
+    evidence and falsely flag correct answers as hallucinations.
+    """
+    outline_docs = []
+    content_docs = []
+    fallback_docs = []
+
+    for doc in docs:
+        metadata = getattr(doc, "metadata", {}) or {}
+        element_type = str(metadata.get("element_type") or "")
+        chunk_type = str(metadata.get("chunk_type") or "")
+        content = str(getattr(doc, "content", "") or "")
+        stripped = content.strip()
+
+        if element_type == "outline" or chunk_type == "document_outline":
+            outline_docs.append(doc)
+        elif element_type in {"section", "table", "row_group"} or len(stripped) >= 80:
+            content_docs.append(doc)
+        else:
+            fallback_docs.append(doc)
+
+    selected: list[Document] = []
+    if outline_docs:
+        selected.append(outline_docs[0])
+
+    for doc in content_docs + fallback_docs:
+        if doc not in selected:
+            selected.append(doc)
+        if len(selected) >= limit:
+            break
+
+    return selected
+
+
 async def review_answer(state: GraphState) -> dict:
     """
     LangGraph 审核节点: 评估答案质量
@@ -67,10 +105,35 @@ async def review_answer(state: GraphState) -> dict:
             "quality_passed": True,
         }
 
-    # 组装检索内容
+    # ---- ★ 优化：高置信度快速通道 ----
+    # medium 查询 + 检索质量高 + 答案简短 → 跳过 LLM 审核
+    complexity = state.get("complexity", "medium")
+    if get_settings().opt_review_fast_path and complexity == "medium":
+        avg_score = (
+            sum(float(getattr(d, "score", 0) or 0) for d in docs) / len(docs)
+            if docs else 0
+        )
+        is_short = len(answer) <= 250
+        has_uncertainty = any(
+            phrase in answer
+            for phrase in ("可能", "大概", "据称", "据说", "或许", "也许", "不太确定", "没有找到")
+        )
+        if avg_score >= 0.65 and is_short and not has_uncertainty:
+            logger.info(
+                "[review] 快速通道: avg_score=%.2f answer_len=%d → 跳过 LLM 审核",
+                avg_score, len(answer),
+            )
+            return {
+                "quality_score": 0.8,
+                "quality_passed": True,
+                "review_reason": "fast_path_high_confidence",
+            }
+
+    # 组装检索内容。优先使用正文 section，避免审核器只看到标题/大纲后误判。
+    review_docs = _select_review_docs(docs)
     contexts = "\n---\n".join(
-        f"[文档{i+1}] {doc.content[:500]}"
-        for i, doc in enumerate(docs[:5])
+        f"[文档{i+1}] {doc.content[:1000]}"
+        for i, doc in enumerate(review_docs)
     )
 
     # LLM 质量评估

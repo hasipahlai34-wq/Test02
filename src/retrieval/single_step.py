@@ -38,7 +38,9 @@ from src.types import (
 )
 from config.settings import get_settings
 from src.models.embeddings import EmbeddingModel
-from src.ingestion.indexer import DocumentIndexer
+from src.ingestion.indexer import DocumentIndexer, get_document_indexer, get_index_generation
+from src.retrieval.query_intent import QueryIntent, classify_query_intent
+from src.utils.observability import langfuse_observation
 
 logger = logging.getLogger(__name__)
 
@@ -262,25 +264,31 @@ class SingleStepStrategy(RetrievalStrategy):
         self,
         indexer: Optional[DocumentIndexer] = None,
         rerank_model: Optional[object] = None,
-        bm25_top_k: int = 8,
-        dense_top_k: int = 15,
-        rerank_top_k: int = 8,
-        rerank_threshold: float = 0.15,
+        bm25_top_k: int | None = None,
+        dense_top_k: int | None = None,
+        rerank_top_k: int | None = None,
+        rerank_threshold: float | None = None,
     ):
         super().__init__(name="单步检索 (BM25 + Dense + Rerank)")
+        settings = get_settings()
         self.strategy_type = StrategyType.SINGLE_STEP
-        self._indexer = indexer or DocumentIndexer()
+        self._indexer = indexer or get_document_indexer()
         self._reranker: Optional[object] = None  # 懒加载
-        self._rerank_model_name = get_settings().rerank_model
+        self._rerank_provider = settings.rerank_provider.lower()
+        self._rerank_model_name = settings.rerank_model
 
-        self.bm25_top_k = bm25_top_k
-        self.dense_top_k = dense_top_k
-        self.rerank_top_k = rerank_top_k
-        self.rerank_threshold = rerank_threshold
+        self.bm25_top_k = bm25_top_k if bm25_top_k is not None else settings.bm25_top_k
+        self.dense_top_k = dense_top_k if dense_top_k is not None else settings.dense_top_k
+        self.rerank_top_k = rerank_top_k if rerank_top_k is not None else settings.rerank_top_k
+        self.rerank_threshold = (
+            rerank_threshold if rerank_threshold is not None else settings.rerank_threshold
+        )
+        self.rerank_candidate_top_k = max(self.rerank_top_k, settings.rerank_candidate_top_k)
 
         # BM25 语料库 (懒构建)
         self._bm25_corpus: list[str] = []
         self._bm25 = None
+        self._bm25_generation = -1
 
     # ----------------------------------------------------------------
     # BM25 关键词检索 (← WeKnora: grep_chunks.go)
@@ -288,7 +296,8 @@ class SingleStepStrategy(RetrievalStrategy):
 
     async def _ensure_bm25(self) -> None:
         """懒构建 BM25 索引"""
-        if self._bm25 is not None:
+        current_generation = get_index_generation()
+        if self._bm25 is not None and self._bm25_generation == current_generation:
             return
 
         from rank_bm25 import BM25Okapi
@@ -300,10 +309,12 @@ class SingleStepStrategy(RetrievalStrategy):
             self._bm25_corpus = [doc["content"] for doc in results]
             tokenized = [self._tokenize(doc) for doc in self._bm25_corpus]
             self._bm25 = BM25Okapi(tokenized)
+            self._bm25_generation = current_generation
             logger.info("BM25 索引已构建: %d 文档", len(self._bm25_corpus))
         else:
             self._bm25_corpus = []
             self._bm25 = None
+            self._bm25_generation = current_generation
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
@@ -327,45 +338,56 @@ class SingleStepStrategy(RetrievalStrategy):
         Returns:
             [(文档内容, BM25得分), ...]
         """
-        if retrieval_filter:
-            from rank_bm25 import BM25Okapi
+        with langfuse_observation(
+            name="retrieval.bm25",
+            as_type="retriever",
+            input={"query": query, "top_k": top_k, "scoped": bool(retrieval_filter)},
+        ) as observation:
+            if retrieval_filter:
+                from rank_bm25 import BM25Okapi
 
-            await self._indexer._ensure_initialized()
-            indexed_docs = [
-                doc for doc in self._indexer.get_all_documents()
-                if _metadata_matches_filter(doc.get("metadata") or {}, retrieval_filter)
-            ]
-            if not indexed_docs:
-                return []
-            corpus = [doc["content"] for doc in indexed_docs]
-            tokenized = [self._tokenize(doc) for doc in corpus]
-            bm25 = BM25Okapi(tokenized)
-        else:
-            await self._ensure_bm25()
-            if not self._bm25 or not self._bm25_corpus:
-                return []
-            indexed_docs = [
-                {"content": content, "metadata": {}}
-                for content in self._bm25_corpus
-            ]
-            corpus = self._bm25_corpus
-            bm25 = self._bm25
+                await self._indexer._ensure_initialized()
+                indexed_docs = [
+                    doc for doc in self._indexer.get_all_documents()
+                    if _metadata_matches_filter(doc.get("metadata") or {}, retrieval_filter)
+                ]
+                if not indexed_docs:
+                    if observation is not None:
+                        observation.update(output={"results": 0, "reason": "empty_scope"})
+                    return []
+                corpus = [doc["content"] for doc in indexed_docs]
+                tokenized = [self._tokenize(doc) for doc in corpus]
+                bm25 = BM25Okapi(tokenized)
+            else:
+                await self._ensure_bm25()
+                if not self._bm25 or not self._bm25_corpus:
+                    if observation is not None:
+                        observation.update(output={"results": 0, "reason": "empty_index"})
+                    return []
+                indexed_docs = [
+                    {"content": content, "metadata": {}}
+                    for content in self._bm25_corpus
+                ]
+                corpus = self._bm25_corpus
+                bm25 = self._bm25
 
-        tokenized_query = self._tokenize(query)
-        scores = bm25.get_scores(tokenized_query)
+            tokenized_query = self._tokenize(query)
+            scores = bm25.get_scores(tokenized_query)
 
-        # 排序取 TopK
-        indexed_scores = list(enumerate(scores))
-        indexed_scores.sort(key=lambda x: x[1], reverse=True)
+            # 排序取 TopK
+            indexed_scores = list(enumerate(scores))
+            indexed_scores.sort(key=lambda x: x[1], reverse=True)
 
-        results = []
-        for idx, score in indexed_scores[:top_k]:
-            if score > 0:
-                metadata = indexed_docs[idx].get("metadata") or {}
-                results.append((corpus[idx], float(score), metadata))
+            results = []
+            for idx, score in indexed_scores[:top_k]:
+                if score > 0:
+                    metadata = indexed_docs[idx].get("metadata") or {}
+                    results.append((corpus[idx], float(score), metadata))
 
-        logger.debug("BM25: query='%s...' → %d results", query[:50], len(results))
-        return results
+            if observation is not None:
+                observation.update(output={"results": len(results)})
+            logger.debug("BM25: query='%s...' → %d results", query[:50], len(results))
+            return results
 
     # ----------------------------------------------------------------
     # Dense 向量检索 (← WeKnora: knowledge_search.go)
@@ -381,11 +403,19 @@ class SingleStepStrategy(RetrievalStrategy):
         Dense 向量语义检索
         ← WeKnora: knowledge_search.go → vectorstore.Search()
         """
-        return await self._indexer.search(
-            query,
-            top_k=top_k,
-            filter_dict=_to_chroma_filter(retrieval_filter),
-        )
+        with langfuse_observation(
+            name="retrieval.dense",
+            as_type="retriever",
+            input={"query": query, "top_k": top_k, "scoped": bool(retrieval_filter)},
+        ) as observation:
+            results = await self._indexer.search(
+                query,
+                top_k=top_k,
+                filter_dict=_to_chroma_filter(retrieval_filter),
+            )
+            if observation is not None:
+                observation.update(output={"results": len(results)})
+            return results
 
     # ----------------------------------------------------------------
     # RRF 融合 (← WeKnora: merge.go)
@@ -449,6 +479,8 @@ class SingleStepStrategy(RetrievalStrategy):
         """懒加载 Reranker 模型"""
         if self._reranker is not None:
             return
+        if self._rerank_provider != "local":
+            return
 
         try:
             from sentence_transformers import CrossEncoder
@@ -463,6 +495,142 @@ class SingleStepStrategy(RetrievalStrategy):
         except Exception as e:
             logger.warning("Reranker 加载失败 (%s)，将跳过重排序", e)
             self._reranker = None
+
+    async def _dashscope_rerank(
+        self,
+        query: str,
+        documents: list[str],
+        top_k: int,
+        threshold: float,
+    ) -> list[tuple[str, float]]:
+        """Rerank candidates with DashScope qwen3-rerank."""
+        import httpx
+
+        settings = get_settings()
+        api_key = settings.dashscope_api_key or settings.rerank_api_key or settings.embedding_api_key
+        if not api_key:
+            raise RuntimeError("RERANK_API_KEY or DASHSCOPE_API_KEY is required")
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        last_error = ""
+        async with httpx.AsyncClient(timeout=settings.rerank_timeout) as client:
+            for url in self._dashscope_rerank_urls(settings.rerank_base_url):
+                payload = self._dashscope_rerank_payload(
+                    url,
+                    query=query,
+                    documents=documents,
+                    top_k=top_k,
+                )
+                response = await client.post(url, headers=headers, json=payload)
+                if response.status_code < 400:
+                    data = response.json()
+                    if not data.get("code"):
+                        break
+                    last_error = (
+                        f"{url}: {data.get('code')} {data.get('message', '')}".strip()
+                    )
+                    continue
+
+                detail = response.text
+                try:
+                    body = response.json()
+                    detail = f"{body.get('code', '')} {body.get('message', '')}".strip()
+                except Exception:
+                    pass
+                last_error = f"{url}: HTTP {response.status_code} {detail}"
+            else:
+                raise RuntimeError(f"DashScope rerank failed: {last_error}")
+
+        raw_results = data.get("results")
+        if raw_results is None:
+            raw_results = (data.get("output") or {}).get("results") or []
+
+        scored: list[tuple[str, float]] = []
+        for item in raw_results:
+            try:
+                idx = int(item.get("index"))
+                score = float(item.get("relevance_score", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(documents) and score >= threshold:
+                scored.append((documents[idx], score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]
+
+    def _dashscope_rerank_payload(
+        self,
+        url: str,
+        query: str,
+        documents: list[str],
+        top_k: int,
+    ) -> dict:
+        """Build payload for DashScope compatible or native rerank endpoints."""
+        settings = get_settings()
+        top_n = min(top_k, len(documents))
+
+        if "/compatible-" in url:
+            payload = {
+                "model": self._rerank_model_name,
+                "documents": documents,
+                "query": query,
+                "top_n": top_n,
+            }
+            if settings.rerank_instruct:
+                payload["instruct"] = settings.rerank_instruct
+            return payload
+
+        payload = {
+            "model": self._rerank_model_name,
+            "input": {
+                "query": query,
+                "documents": documents,
+            },
+            "parameters": {
+                "top_n": top_n,
+                "return_documents": False,
+            },
+        }
+        if settings.rerank_instruct:
+            payload["parameters"]["instruct"] = settings.rerank_instruct
+        return payload
+
+    @staticmethod
+    def _dashscope_rerank_urls(configured_url: str) -> list[str]:
+        """Return rerank endpoint candidates for public and workspace DashScope hosts."""
+        raw = configured_url.rstrip("/")
+        candidates = [raw]
+
+        replacements = []
+        if raw.endswith("/compatible-mode/v1"):
+            replacements.extend([
+                raw + "/reranks",
+                raw.replace("/compatible-mode/v1", "/compatible-api/v1/reranks"),
+                raw.replace("/compatible-mode/v1", "/api/v1/services/rerank/text-rerank/text-rerank"),
+            ])
+        elif raw.endswith("/compatible-api/v1"):
+            replacements.append(raw + "/reranks")
+        elif raw.endswith("/api/v1"):
+            replacements.append(raw + "/services/rerank/text-rerank/text-rerank")
+        elif "/compatible-api/v1/reranks" in raw:
+            replacements.extend([
+                raw.replace("/compatible-api/v1/reranks", "/compatible-mode/v1/reranks"),
+                raw.replace("/compatible-api/v1/reranks", "/api/v1/services/rerank/text-rerank/text-rerank"),
+            ])
+        elif "/compatible-mode/v1/reranks" in raw:
+            replacements.extend([
+                raw.replace("/compatible-mode/v1/reranks", "/compatible-api/v1/reranks"),
+                raw.replace("/compatible-mode/v1/reranks", "/api/v1/services/rerank/text-rerank/text-rerank"),
+            ])
+
+        for url in replacements:
+            if url not in candidates:
+                candidates.append(url)
+        return candidates
 
     async def _rerank(
         self,
@@ -489,29 +657,192 @@ class SingleStepStrategy(RetrievalStrategy):
         Returns:
             [(文档内容, rerank得分), ...]
         """
-        await self._ensure_reranker()
+        if not documents:
+            return []
 
-        if not self._reranker or not documents:
-            return [(doc, 0.0) for doc in documents[:top_k]]
+        with langfuse_observation(
+            name="retrieval.rerank",
+            as_type="retriever",
+            input={
+                "query": query,
+                "candidates": len(documents),
+                "top_k": top_k,
+                "threshold": threshold,
+            },
+        ) as observation:
+            settings = get_settings()
+            if not settings.rerank_enabled:
+                result = [(doc, 0.0) for doc in documents[:top_k]]
+                if observation is not None:
+                    observation.update(output={"results": len(result), "enabled": False})
+                return result
 
-        # 构建 query-doc pairs
-        pairs = [[query, doc] for doc in documents]
-        scores = self._reranker.predict(pairs)
+            if self._rerank_provider == "dashscope":
+                try:
+                    reranked = await self._dashscope_rerank(query, documents, top_k, threshold)
+                    if reranked:
+                        logger.debug(
+                            "DashScope rerank: %d candidates → %d results",
+                            len(documents), len(reranked),
+                        )
+                        if observation is not None:
+                            observation.update(output={"results": len(reranked), "provider": "dashscope"})
+                        return reranked
+                except Exception as e:
+                    logger.warning("DashScope rerank failed; using fused order: %s", e)
+                result = [(doc, 0.0) for doc in documents[:top_k]]
+                if observation is not None:
+                    observation.update(output={
+                        "results": len(result),
+                        "provider": "dashscope",
+                        "fallback": True,
+                    })
+                return result
 
-        # 排序 + 过滤 + 截断
-        scored = list(zip(documents, scores))
-        scored.sort(key=lambda x: x[1], reverse=True)
-        filtered = [(doc, float(score)) for doc, score in scored if score >= threshold]
+            await self._ensure_reranker()
 
-        logger.debug(
-            "Rerank: %d candidates → %d results (top_k=%d, threshold=%.2f)",
-            len(documents), len(filtered), top_k, threshold,
-        )
-        return filtered[:top_k]
+            if not self._reranker:
+                result = [(doc, 0.0) for doc in documents[:top_k]]
+                if observation is not None:
+                    observation.update(output={"results": len(result), "fallback": True})
+                return result
+
+            # 构建 query-doc pairs
+            pairs = [[query, doc] for doc in documents]
+            scores = self._reranker.predict(pairs)
+
+            # 排序 + 过滤 + 截断
+            scored = list(zip(documents, scores))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            filtered = [(doc, float(score)) for doc, score in scored if score >= threshold]
+
+            result = filtered[:top_k]
+            if observation is not None:
+                observation.update(output={"results": len(result), "provider": self._rerank_provider})
+            logger.debug(
+                "Rerank: %d candidates → %d results (top_k=%d, threshold=%.2f)",
+                len(documents), len(filtered), top_k, threshold,
+            )
+            return result
 
     # ----------------------------------------------------------------
     # 主检索入口
     # ----------------------------------------------------------------
+
+    async def _structure_scope_search(
+        self,
+        query: str,
+        retrieval_filter: dict | None,
+    ) -> SearchResult | None:
+        """Return outline/structure documents for global scoped questions."""
+        if not retrieval_filter:
+            return None
+
+        started = time.perf_counter()
+        intent = classify_query_intent(query)
+        if intent not in {
+            QueryIntent.GLOBAL_COUNT,
+            QueryIntent.GLOBAL_LIST,
+            QueryIntent.TABLE_AGGREGATION,
+            QueryIntent.SUMMARY,
+            QueryIntent.COMPARISON,
+        }:
+            return None
+
+        await self._indexer._ensure_initialized()
+        indexed_docs = [
+            doc for doc in self._indexer.get_all_documents()
+            if _metadata_matches_filter(doc.get("metadata") or {}, retrieval_filter)
+        ]
+        if not indexed_docs:
+            return None
+
+        prefer_content_chunks = (
+            intent in {
+                QueryIntent.TABLE_AGGREGATION,
+                QueryIntent.SUMMARY,
+                QueryIntent.COMPARISON,
+            }
+            or bool(re.search(
+                r"(分别|描述|介绍|详情|技术栈|时间|亮点|职责|内容|怎么|如何)",
+                query,
+            ))
+        )
+
+        def priority(item: dict) -> tuple[int, int]:
+            metadata = item.get("metadata") or {}
+            chunk_type = str(metadata.get("chunk_type") or "")
+            element_type = str(metadata.get("element_type") or "")
+            content = str(item.get("content") or "")
+            if chunk_type == "document_outline" or element_type == "outline":
+                return (0, -len(content))
+            if prefer_content_chunks:
+                if element_type in {"section", "table", "row_group"}:
+                    return (1, -len(content))
+                if element_type == "heading":
+                    return (2, -len(content))
+            else:
+                if element_type == "heading":
+                    return (1, -len(content))
+                if element_type in {"section", "table", "row_group"}:
+                    return (2, -len(content))
+            return (3, -len(content))
+
+        structural = sorted(
+            [
+                doc for doc in indexed_docs
+                if (doc.get("metadata") or {}).get("chunk_type") == "document_outline"
+                or (doc.get("metadata") or {}).get("element_type") in {"outline", "heading", "section", "table", "row_group"}
+            ],
+            key=priority,
+        )
+        if not structural:
+            return None
+
+        selected = structural[:18]
+        documents: list[Document] = []
+        for rank, item in enumerate(selected):
+            metadata = dict(item.get("metadata") or {})
+            typed_metadata = {str(k): str(v) for k, v in metadata.items() if v is not None}
+            try:
+                chunk_index = int(metadata.get("chunk_index") or rank)
+            except (TypeError, ValueError):
+                chunk_index = rank
+            documents.append(Document(
+                content=str(item.get("content") or ""),
+                score=max(0.0, 1.0 - rank * 0.02),
+                match_type=MatchType.KEYWORD,
+                source=str(metadata.get("source") or metadata.get("upload_filename") or ""),
+                source_path=str(metadata.get("source") or ""),
+                chunk_index=chunk_index,
+                metadata={**typed_metadata, "query_intent": intent.value, "retrieval_scope": "structure"},
+            ))
+
+        with langfuse_observation(
+            name="retrieval.structure_scope",
+            as_type="retriever",
+            input={"query": query, "intent": intent.value, "scope_docs": len(indexed_docs)},
+        ) as observation:
+            output = {
+                "intent": intent.value,
+                "selected": len(documents),
+                "scope_docs": len(indexed_docs),
+            }
+            if observation is not None:
+                observation.update(output=output)
+            logger.info(
+                "Structure scoped retrieval: intent=%s selected=%d scope_docs=%d",
+                intent.value,
+                len(documents),
+                len(indexed_docs),
+            )
+            return SearchResult(
+                query=query,
+                documents=documents,
+                strategy=self.strategy_type,
+                total_found=len(documents),
+                search_time_ms=(time.perf_counter() - started) * 1000,
+            )
 
     async def retrieve(self, query: str, state: AgentState | None = None, **kwargs) -> SearchResult:
         """
@@ -532,6 +863,10 @@ class SingleStepStrategy(RetrievalStrategy):
         retrieval_filter = kwargs.get("retrieval_filter")
         requested_top_k = kwargs.get("top_k")
 
+        structure_result = await self._structure_scope_search(query, retrieval_filter)
+        if structure_result is not None:
+            return structure_result
+
         # Step 1: 并行执行 BM25 和 Dense 检索
         bm25_task = self._bm25_search(
             query,
@@ -551,8 +886,9 @@ class SingleStepStrategy(RetrievalStrategy):
 
         # Step 3: Rerank 精排 (← WeKnora: rerank.go)
         if fused:
-            # Send more candidates to reranker (2x rerank_top_k) for better recall
-            rerank_pool_size = max(self.rerank_top_k * 2, len(fused))
+            # Keep cloud rerank bounded; it is paid per token and should only
+            # refine the strongest fused candidates.
+            rerank_pool_size = min(len(fused), self.rerank_candidate_top_k)
             fused_metadata = {content[:100]: metadata for content, _, metadata in fused}
             fused_contents = [content for content, _, _ in fused[:rerank_pool_size]]
             reranked = await self._rerank(
@@ -637,6 +973,12 @@ async def _warmup_reranker_async() -> None:
     """
     global _reranker_warmed_up, _reranker_warmup_status
     try:
+        settings = get_settings()
+        if not settings.rerank_enabled or settings.rerank_provider.lower() != "local":
+            _reranker_warmed_up = True
+            _reranker_warmup_status = "ready"
+            logger.info("Reranker warmup skipped for provider=%s", settings.rerank_provider)
+            return
         _reranker_warmup_status = "warming"
         logger.info("Reranker 模型预热开始...")
         strategy = await get_single_step()

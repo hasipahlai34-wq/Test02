@@ -16,6 +16,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from config.settings import Settings
+
+
+def _make_safety_test_settings(*, prescreen: bool = True) -> Settings:
+    """Create test Settings with optional prescreen/domain-skip disabled."""
+    s = Settings()
+    if not prescreen:
+        s.opt_input_safety_prescreen = False
+        s.opt_output_safety_domain_skip = False
+    return s
+
 
 # ================================================================
 # 输入护栏测试
@@ -31,7 +42,7 @@ async def test_input_guard_safe():
     )
 
     with patch(
-        "src.safety.content_guard.get_llm_client", return_value=mock_llm
+        "src.safety.content_guard._get_safety_llm_client", return_value=mock_llm
     ):
         from src.safety.content_guard import check_input_safety
 
@@ -50,7 +61,7 @@ async def test_input_guard_accepts_fenced_json():
     )
 
     with patch(
-        "src.safety.content_guard.get_llm_client", return_value=mock_llm
+        "src.safety.content_guard._get_safety_llm_client", return_value=mock_llm
     ):
         from src.safety.content_guard import check_input_safety
 
@@ -70,7 +81,7 @@ async def test_input_guard_unsafe():
     )
 
     with patch(
-        "src.safety.content_guard.get_llm_client", return_value=mock_llm
+        "src.safety.content_guard._get_safety_llm_client", return_value=mock_llm
     ):
         from src.safety.content_guard import check_input_safety
 
@@ -94,7 +105,10 @@ async def test_input_guard_exception_defaults_to_block():
     mock_llm.ask = AsyncMock(side_effect=ConnectionError("连接超时"))
 
     with patch(
-        "src.safety.content_guard.get_llm_client", return_value=mock_llm
+        "src.safety.content_guard._get_safety_llm_client", return_value=mock_llm
+    ), patch(
+        "src.safety.content_guard.get_settings",
+        return_value=_make_safety_test_settings(prescreen=False),
     ):
         from src.safety.content_guard import check_input_safety
 
@@ -114,7 +128,10 @@ async def test_input_guard_json_error_defaults_to_block():
     mock_llm.ask = AsyncMock(return_value="这不是合法的 JSON {{{")
 
     with patch(
-        "src.safety.content_guard.get_llm_client", return_value=mock_llm
+        "src.safety.content_guard._get_safety_llm_client", return_value=mock_llm
+    ), patch(
+        "src.safety.content_guard.get_settings",
+        return_value=_make_safety_test_settings(prescreen=False),
     ):
         from src.safety.content_guard import check_input_safety
 
@@ -140,7 +157,7 @@ async def test_output_guard_safe():
     )
 
     with patch(
-        "src.safety.content_guard.get_llm_client", return_value=mock_llm
+        "src.safety.content_guard._get_safety_llm_client", return_value=mock_llm
     ):
         from src.graph.state import GraphState
         from src.safety.content_guard import check_output_safety
@@ -167,7 +184,7 @@ async def test_output_guard_high_risk_triggers_hitl():
     )
 
     with patch(
-        "src.safety.content_guard.get_llm_client", return_value=mock_llm
+        "src.safety.content_guard._get_safety_llm_client", return_value=mock_llm
     ):
         from src.graph.state import GraphState
         from src.safety.content_guard import check_output_safety
@@ -191,7 +208,7 @@ async def test_output_guard_exception_defaults_to_block():
     mock_llm.ask = AsyncMock(side_effect=RuntimeError("LLM 内部错误"))
 
     with patch(
-        "src.safety.content_guard.get_llm_client", return_value=mock_llm
+        "src.safety.content_guard._get_safety_llm_client", return_value=mock_llm
     ):
         from src.graph.state import GraphState
         from src.safety.content_guard import check_output_safety
@@ -217,7 +234,7 @@ async def test_output_guard_empty_answer_skips():
     mock_llm.ask = AsyncMock()
 
     with patch(
-        "src.safety.content_guard.get_llm_client", return_value=mock_llm
+        "src.safety.content_guard._get_safety_llm_client", return_value=mock_llm
     ):
         from src.graph.state import GraphState
         from src.safety.content_guard import check_output_safety

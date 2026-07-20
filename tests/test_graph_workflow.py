@@ -148,8 +148,8 @@ async def test_graph_workflow_medium_path():
         assert "retrieved_docs" in result, "retrieved_docs 应在 state 中"
         assert len(result["retrieved_docs"]) == 1, "应有 1 个检索到的文档"
 
-        # 质量审核 (review node 应返回质量评分)
-        assert result.get("quality_score") == 0.85, "质量评分应为 0.85"
+        # 质量审核 (review node — 快速通道命中，返回默认高分)
+        assert result.get("quality_score") == 0.8, "快速通道质量评分应为 0.8"
         assert result.get("quality_passed") is True, "质量审核应通过"
 
         # 安全检查 (guard node 应返回安全结果)
@@ -398,10 +398,10 @@ async def test_state_field_propagation():
         # conversation_context → 在 state 中保留
         assert "conversation_context" in result
 
-        # 质量字段 → 从 review node 传递
+        # 质量字段 → 从 review node 传递（快速通道命中）
         assert "quality_score" in result
         assert "quality_passed" in result
-        assert result.get("quality_score") == 0.85
+        assert result.get("quality_score") == 0.8
 
         # 安全字段 → 从 guard node 传递
         assert "safety_risk_level" in result

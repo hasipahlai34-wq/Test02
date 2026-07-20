@@ -27,6 +27,7 @@ import io
 import logging
 import re
 from collections import Counter
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -58,6 +59,242 @@ class ChunkingStrategy(str, Enum):
 # 分块策略实现
 # ================================================================
 
+
+
+@dataclass(frozen=True)
+class DocumentProfile:
+    """Lightweight document profile used by dynamic chunk planning."""
+
+    file_path: str
+    file_ext: str
+    file_size: int
+    total_chars: int
+    estimated_tokens: int
+    paragraph_count: int
+    avg_paragraph_tokens: float
+    heading_count: int
+    table_like_ratio: float
+    code_like_ratio: float
+    row_count: int | None = None
+    language: str = "unknown"
+
+
+@dataclass(frozen=True)
+class ChunkPlan:
+    """Deterministic chunk plan; char fields are consumed by current splitters."""
+
+    strategy: str
+    target_tokens: int
+    target_chars: int
+    overlap_tokens: int
+    overlap_chars: int
+    min_tokens: int
+    preserve_tables: bool
+    preserve_code_blocks: bool
+    reason: str
+
+
+BASE_CHUNK_PLANS: dict[str, dict[str, int | str]] = {
+    ".pdf": {"strategy": "pdf_structured", "tokens": 800, "overlap": 100},
+    ".docx": {"strategy": "docx_structured", "tokens": 750, "overlap": 90},
+    ".doc": {"strategy": "docx_structured", "tokens": 750, "overlap": 90},
+    ".md": {"strategy": "markdown_enhanced", "tokens": 650, "overlap": 70},
+    ".markdown": {"strategy": "markdown_enhanced", "tokens": 650, "overlap": 70},
+    ".txt": {"strategy": "txt_paragraph", "tokens": 650, "overlap": 80},
+    ".csv": {"strategy": "csv_rows", "tokens": 1000, "overlap": 0},
+}
+
+
+def _clamp(value: float, minimum: int, maximum: int) -> int:
+    return int(max(minimum, min(maximum, round(value))))
+
+
+def _read_text_with_fallback(path: Path) -> str:
+    for encoding in ("utf-8", "utf-8-sig", "gb18030", "latin-1"):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return path.read_bytes().decode("utf-8", errors="ignore")
+
+
+def _extract_profile_text(path: Path) -> tuple[str, int | None]:
+    ext = path.suffix.lower()
+
+    if ext == ".pdf":
+        try:
+            import fitz
+
+            with fitz.open(str(path)) as doc:
+                return "\n\n".join(page.get_text("text") for page in doc), None
+        except Exception as exc:
+            logger.debug("PDF profile extraction fallback: %s", exc)
+            return "", None
+
+    if ext in {".docx", ".doc"}:
+        try:
+            from docx import Document as DocxDocument
+
+            doc = DocxDocument(str(path))
+            parts = [p.text for p in doc.paragraphs if p.text.strip()]
+            for table in doc.tables:
+                parts.append(_format_table_as_text(table))
+            return "\n\n".join(parts), None
+        except Exception as exc:
+            logger.debug("DOCX profile extraction fallback: %s", exc)
+            return "", None
+
+    if ext == ".csv":
+        try:
+            with open(path, "r", encoding="utf-8", newline="") as f:
+                rows = list(csv.reader(f))
+        except UnicodeDecodeError:
+            with open(path, "r", encoding="gb18030", newline="") as f:
+                rows = list(csv.reader(f))
+        text = "\n".join(",".join(row) for row in rows)
+        return text, max(0, len(rows) - 1)
+
+    return _read_text_with_fallback(path), None
+
+
+def _count_heading_lines(lines: list[str], file_ext: str) -> int:
+    count = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        is_markdown_heading = stripped.startswith("#")
+        is_numbered_heading = bool(re.match(r"^\d+(?:\.\d+)*[\u3001.\s]+", stripped))
+        is_chinese_heading = stripped.startswith("\u7b2c") and any(
+            marker in stripped[:16]
+            for marker in ("\u7ae0", "\u8282", "\u7bc7", "\u90e8\u5206")
+        )
+        if is_markdown_heading or is_numbered_heading or is_chinese_heading:
+            count += 1
+    if file_ext in {".md", ".markdown"}:
+        return count
+    return count + sum(1 for line in lines if 0 < len(line.strip()) <= 40 and line.strip().endswith(("\uff1a", ":")))
+
+
+def profile_document(file_path: str) -> DocumentProfile:
+    """Build a document profile; failures return a conservative profile."""
+    path = Path(file_path)
+    ext = path.suffix.lower()
+    file_size = path.stat().st_size if path.exists() else 0
+
+    try:
+        text, row_count = _extract_profile_text(path)
+    except Exception as exc:
+        logger.warning("Document profiling failed (%s): %s", file_path, exc)
+        text, row_count = "", None
+
+    total_chars = len(text)
+    estimated_tokens = max(1, int(total_chars / 2))
+    nonempty_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if len(paragraphs) <= 1 and nonempty_lines:
+        paragraphs = nonempty_lines
+
+    paragraph_count = len(paragraphs)
+    avg_paragraph_tokens = (estimated_tokens / paragraph_count) if paragraph_count else float(estimated_tokens)
+    heading_count = _count_heading_lines(nonempty_lines, ext)
+
+    line_count = max(1, len(nonempty_lines))
+    table_lines = sum(
+        1
+        for line in nonempty_lines
+        if line.count("|") >= 2 or line.count(",") >= 3 or "	" in line
+    )
+    code_lines = sum(
+        1
+        for line in nonempty_lines
+        if line.startswith(("```", "    ", "	"))
+        or bool(re.search(r"[{};]\s*$", line))
+        or line.startswith(("def ", "class ", "function ", "import ", "from "))
+    )
+
+    table_like_ratio = 1.0 if ext == ".csv" and row_count else table_lines / line_count
+    code_like_ratio = code_lines / line_count
+
+    return DocumentProfile(
+        file_path=str(file_path),
+        file_ext=ext,
+        file_size=file_size,
+        total_chars=total_chars,
+        estimated_tokens=estimated_tokens,
+        paragraph_count=paragraph_count,
+        avg_paragraph_tokens=avg_paragraph_tokens,
+        heading_count=heading_count,
+        table_like_ratio=table_like_ratio,
+        code_like_ratio=code_like_ratio,
+        row_count=row_count,
+    )
+
+
+def infer_chunk_plan(profile: DocumentProfile) -> ChunkPlan:
+    """Infer a dynamic chunk plan from file type, length, and structure."""
+    base = BASE_CHUNK_PLANS.get(
+        profile.file_ext,
+        {"strategy": "txt_paragraph", "tokens": 650, "overlap": 80},
+    )
+    target_tokens = float(base["tokens"])
+    overlap_tokens = float(base["overlap"])
+    reasons = [f"base={base['strategy']}"]
+
+    if profile.estimated_tokens < 800:
+        target_tokens = max(200.0, float(profile.estimated_tokens))
+        overlap_tokens = 0.0
+        reasons.append("short_document_no_overlap")
+    elif profile.estimated_tokens < 3000:
+        target_tokens *= 0.85
+        reasons.append("medium_document_smaller_chunks")
+    elif profile.estimated_tokens > 50000:
+        target_tokens *= 1.2
+        reasons.append("large_document_larger_chunks")
+
+    if profile.avg_paragraph_tokens < 40:
+        target_tokens *= 0.9
+        overlap_tokens *= 0.7
+        reasons.append("short_paragraphs")
+    elif profile.avg_paragraph_tokens > 220:
+        target_tokens *= 1.15
+        overlap_tokens *= 1.2
+        reasons.append("long_paragraphs")
+
+    if profile.heading_count >= 10:
+        target_tokens *= 0.9
+        reasons.append("many_headings")
+
+    preserve_tables = profile.table_like_ratio > 0.2 or profile.file_ext == ".csv"
+    if preserve_tables:
+        overlap_tokens = min(overlap_tokens, 40.0)
+        reasons.append("table_heavy")
+
+    preserve_code_blocks = profile.code_like_ratio > 0.15
+    if preserve_code_blocks:
+        target_tokens = min(target_tokens, 700.0)
+        overlap_tokens = min(overlap_tokens, 50.0)
+        reasons.append("code_heavy")
+
+    target_tokens_int = _clamp(target_tokens, 300, 1200)
+    max_overlap = min(180, int(target_tokens_int * 0.2))
+    overlap_tokens_int = _clamp(overlap_tokens, 0, max_overlap)
+
+    return ChunkPlan(
+        strategy=str(base["strategy"]),
+        target_tokens=target_tokens_int,
+        target_chars=max(400, int(target_tokens_int * 2)),
+        overlap_tokens=overlap_tokens_int,
+        overlap_chars=int(overlap_tokens_int * 2),
+        min_tokens=100,
+        preserve_tables=preserve_tables,
+        preserve_code_blocks=preserve_code_blocks,
+        reason=", ".join(reasons),
+    )
+
+
+def get_chunk_plan(file_path: str) -> ChunkPlan:
+    return infer_chunk_plan(profile_document(file_path))
 
 def chunk_fixed_size(
     documents: list[Document],
@@ -255,7 +492,11 @@ def chunk_markdown(
 # ================================================================
 
 
-def _chunk_pdf_structured(file_path: str) -> list[Document]:
+def _chunk_pdf_structured(
+    file_path: str,
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+) -> list[Document]:
     """
     PDF 结构感知分块 — 基于字体大小自动识别标题层级
 
@@ -267,16 +508,16 @@ def _chunk_pdf_structured(file_path: str) -> list[Document]:
     5. 按标题边界切分,每节过长则递归细切
     6. metadata: heading_path / page_number / chunk_type
     """
+    settings = get_settings()
+    chunk_size = chunk_size if chunk_size is not None else settings.chunk_size
+    chunk_overlap = chunk_overlap if chunk_overlap is not None else settings.chunk_overlap
+    font_delta = settings.chunk_heading_font_delta
+
     try:
         import fitz
     except ImportError:
-        logger.warning("pymupdf 未安装,降级为递归分块")
-        return _chunk_txt_paragraph(file_path)
-
-    settings = get_settings()
-    chunk_size = settings.chunk_size
-    chunk_overlap = settings.chunk_overlap
-    font_delta = settings.chunk_heading_font_delta
+        logger.warning("pymupdf is not installed, fallback to TXT paragraph chunking")
+        return _chunk_txt_paragraph(file_path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     doc = fitz.open(file_path)
     all_spans: list[dict] = []
@@ -301,7 +542,7 @@ def _chunk_pdf_structured(file_path: str) -> list[Document]:
 
     if not all_spans:
         logger.warning("PDF 无文本内容,降级为 TXT 段落分块")
-        return _chunk_txt_paragraph(file_path)
+        return _chunk_txt_paragraph(file_path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     # 推断正文字号（众数）
     size_counts = Counter(s["size"] for s in all_spans)
@@ -391,7 +632,11 @@ def _chunk_pdf_structured(file_path: str) -> list[Document]:
     return chunks
 
 
-def _chunk_docx_structured(file_path: str) -> list[Document]:
+def _chunk_docx_structured(
+    file_path: str,
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+) -> list[Document]:
     """
     Word 样式感知分块 — 基于 Heading 样式识别章节结构
 
@@ -402,16 +647,16 @@ def _chunk_docx_structured(file_path: str) -> list[Document]:
     4. 按标题边界切分,每节过长则递归细切
     5. metadata: heading_path / heading_level / chunk_type
     """
+    settings = get_settings()
+    chunk_size = chunk_size if chunk_size is not None else settings.chunk_size
+    chunk_overlap = chunk_overlap if chunk_overlap is not None else settings.chunk_overlap
+
     try:
         from docx import Document as DocxDocument
         from docx.enum.style import WD_STYLE_TYPE
     except ImportError:
-        logger.warning("python-docx 未安装,降级为递归分块")
-        return _chunk_txt_paragraph(file_path)
-
-    settings = get_settings()
-    chunk_size = settings.chunk_size
-    chunk_overlap = settings.chunk_overlap
+        logger.warning("python-docx is not installed, fallback to TXT paragraph chunking")
+        return _chunk_txt_paragraph(file_path, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
     doc = DocxDocument(file_path)
 
@@ -543,7 +788,11 @@ def _format_table_as_text(table) -> str:
     return "\n".join(rows)
 
 
-def _chunk_markdown_enhanced(file_path: str) -> list[Document]:
+def _chunk_markdown_enhanced(
+    file_path: str,
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+) -> list[Document]:
     """
     增强 Markdown 结构分块 — 保护代码块/表格/列表完整性
 
@@ -554,8 +803,8 @@ def _chunk_markdown_enhanced(file_path: str) -> list[Document]:
     - 过长段落按 sentence 边界切分
     """
     settings = get_settings()
-    chunk_size = settings.chunk_size
-    chunk_overlap = settings.chunk_overlap
+    chunk_size = chunk_size if chunk_size is not None else settings.chunk_size
+    chunk_overlap = chunk_overlap if chunk_overlap is not None else settings.chunk_overlap
 
     text = Path(file_path).read_text(encoding="utf-8")
 
@@ -697,7 +946,11 @@ def _split_with_protected_blocks(
     return final_chunks
 
 
-def _chunk_txt_paragraph(file_path: str) -> list[Document]:
+def _chunk_txt_paragraph(
+    file_path: str,
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+) -> list[Document]:
     """
     TXT 段落感知分块 — 按段落边界(双换行)切分
 
@@ -708,8 +961,8 @@ def _chunk_txt_paragraph(file_path: str) -> list[Document]:
     4. metadata: paragraph_index / chunk_type
     """
     settings = get_settings()
-    chunk_size = settings.chunk_size
-    chunk_overlap = settings.chunk_overlap
+    chunk_size = chunk_size if chunk_size is not None else settings.chunk_size
+    chunk_overlap = chunk_overlap if chunk_overlap is not None else settings.chunk_overlap
 
     text = Path(file_path).read_text(encoding="utf-8")
     source_name = Path(file_path).name
@@ -748,7 +1001,11 @@ def _chunk_txt_paragraph(file_path: str) -> list[Document]:
     return chunks
 
 
-def _chunk_csv_rows(file_path: str) -> list[Document]:
+def _chunk_csv_rows(
+    file_path: str,
+    chunk_size: int | None = None,
+    chunk_overlap: int | None = None,
+) -> list[Document]:
     """
     CSV 行完整分块 — 每 N 行一组,每组携带表头
 
@@ -759,7 +1016,7 @@ def _chunk_csv_rows(file_path: str) -> list[Document]:
     4. metadata: columns / row_range / total_rows / chunk_type
     """
     settings = get_settings()
-    chunk_size = settings.chunk_size
+    chunk_size = chunk_size if chunk_size is not None else settings.chunk_size
     source_name = Path(file_path).name
 
     # 读取 CSV
@@ -868,60 +1125,125 @@ def _post_process_chunks(chunks: list[Document]) -> list[Document]:
 
 
 def auto_chunk(file_path: str) -> list[Document]:
-    """
-    根据文件类型自动选择最优分块策略(企业级)
-
-    策略映射:
-      .pdf  → 结构感知(字体识别标题)
-      .docx → 样式感知(Heading 样式)
-      .md   → 增强标题分块(代码/表格/列表保护)
-      .txt  → 段落感知(段落边界)
-      .csv  → 行完整(表头携带)
-      其他   → 段落感知降级
-
-    Args:
-        file_path: 文档文件路径
-
-    Returns:
-        分块后的 Document 列表
-    """
-    ext = Path(file_path).suffix.lower()
+    """Create dynamic, structure-aware chunks for any supported document type."""
     source_name = Path(file_path).name
+    plan = get_chunk_plan(file_path)
 
-    strategy_map: dict[str, tuple[str, callable]] = {
-        ".pdf": ("PDF 结构感知", _chunk_pdf_structured),
-        ".docx": ("DOCX 样式感知", _chunk_docx_structured),
-        ".doc": ("DOCX 样式感知", _chunk_docx_structured),
-        ".md": ("Markdown 增强", _chunk_markdown_enhanced),
-        ".markdown": ("Markdown 增强", _chunk_markdown_enhanced),
-        ".txt": ("TXT 段落感知", _chunk_txt_paragraph),
-        ".csv": ("CSV 行完整", _chunk_csv_rows),
-    }
-
-    strategy_name, chunk_func = strategy_map.get(ext, ("TXT 段落感知(降级)", _chunk_txt_paragraph))
-
-    logger.info("使用 %s 策略处理 %s", strategy_name, file_path)
+    def _legacy_chunks() -> list[Document]:
+        ext = Path(file_path).suffix.lower()
+        strategy_map: dict[str, tuple[str, callable]] = {
+            ".pdf": ("pdf_structured", _chunk_pdf_structured),
+            ".docx": ("docx_structured", _chunk_docx_structured),
+            ".doc": ("docx_structured", _chunk_docx_structured),
+            ".md": ("markdown_enhanced", _chunk_markdown_enhanced),
+            ".markdown": ("markdown_enhanced", _chunk_markdown_enhanced),
+            ".txt": ("txt_paragraph", _chunk_txt_paragraph),
+            ".csv": ("csv_rows", _chunk_csv_rows),
+        }
+        strategy_name, chunk_func = strategy_map.get(ext, ("txt_paragraph_fallback", _chunk_txt_paragraph))
+        try:
+            legacy = chunk_func(file_path, chunk_size=plan.target_chars, chunk_overlap=plan.overlap_chars)
+        except Exception as exc:
+            logger.warning("%s strategy failed (%s), fallback to TXT paragraph chunking", strategy_name, exc)
+            legacy = _chunk_txt_paragraph(file_path, chunk_size=plan.target_chars, chunk_overlap=plan.overlap_chars)
+        return _post_process_chunks(legacy)
 
     try:
-        chunks = chunk_func(file_path)
-    except Exception as e:
-        logger.warning("%s 策略失败(%s),降级为 TXT 段落分块", strategy_name, e)
-        chunks = _chunk_txt_paragraph(file_path)
+        from src.ingestion.document_structure import extract_document_structure
 
-    # 后处理: 合并过小 chunk
-    chunks = _post_process_chunks(chunks)
+        structure = extract_document_structure(file_path)
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=plan.target_chars,
+            chunk_overlap=plan.overlap_chars,
+            separators=get_settings().chunk_separators,
+        )
+        chunks: list[Document] = []
+        common_meta = {
+            "document_id": structure.document_id,
+            "parse_quality_score": structure.parse_quality_score,
+            "outline_preview": structure.outline_text[:500],
+            "element_count": len(structure.elements),
+            "warning_count": len(structure.warnings),
+            "parse_warnings": "; ".join(structure.warnings[:5]),
+            "structure_file_type": structure.file_type,
+        }
 
-    # 统一补充元数据
+        outline_meta = {
+            **common_meta,
+            "source": str(file_path),
+            "chunk_type": "document_outline",
+            "element_type": "outline",
+            "section_title": "Document Outline",
+            "section_path": "Document Outline",
+        }
+        if structure.outline_text.strip():
+            chunks.append(Document(page_content=structure.outline_text, metadata=outline_meta))
+
+        for element in structure.elements:
+            if not element.text.strip():
+                continue
+            meta = {
+                **common_meta,
+                **element.metadata,
+                "source": element.source,
+                "element_id": element.element_id,
+                "element_type": element.element_type,
+                "chunk_type": element.element_type,
+                "section_title": element.section_title or "",
+                "section_path": element.section_path or "",
+                "heading_level": element.heading_level or 0,
+                "page_number": element.page_number or 0,
+                "row_range": element.row_range or "",
+                "structure_order": element.order,
+            }
+            if len(element.text) > plan.target_chars and element.element_type not in {"outline", "row_group", "code"}:
+                sub_docs = splitter.create_documents([element.text], [meta])
+                for part_index, sub_doc in enumerate(sub_docs):
+                    sub_doc.metadata["chunk_part"] = part_index
+                    chunks.append(sub_doc)
+            else:
+                chunks.append(Document(page_content=element.text, metadata=meta))
+
+        if not chunks:
+            logger.warning("Structure extraction produced no chunks for %s; using legacy chunking", file_path)
+            chunks = _legacy_chunks()
+            structure = None
+        else:
+            logger.info(
+                "Structure-aware chunking: %s -> %d chunks (quality=%.3f, elements=%d)",
+                source_name,
+                len(chunks),
+                structure.parse_quality_score,
+                len(structure.elements),
+            )
+    except Exception as exc:
+        logger.warning("Structure-aware chunking failed for %s: %s; using legacy chunking", file_path, exc)
+        chunks = _legacy_chunks()
+
     for i, chunk in enumerate(chunks):
         chunk.metadata["chunk_index"] = i
-        chunk.metadata["chunk_strategy"] = ext
+        chunk.metadata["chunking_mode"] = "dynamic_structure_aware"
+        chunk.metadata["chunk_strategy"] = plan.strategy
+        chunk.metadata["chunk_strategy_label"] = "structure_aware"
+        chunk.metadata["chunk_target_tokens"] = plan.target_tokens
+        chunk.metadata["chunk_target_chars"] = plan.target_chars
+        chunk.metadata["chunk_overlap_tokens"] = plan.overlap_tokens
+        chunk.metadata["chunk_overlap_chars"] = plan.overlap_chars
+        chunk.metadata["chunk_plan_reason"] = plan.reason
         if "source" not in chunk.metadata:
             chunk.metadata["source"] = str(file_path)
         if "chunk_id" not in chunk.metadata:
             import uuid
             chunk.metadata["chunk_id"] = str(uuid.uuid4())[:8]
 
-    logger.info("分块完成: %s → %d chunks (策略=%s)", source_name, len(chunks), strategy_name)
+    logger.info(
+        "Chunking complete: %s -> %d chunks (strategy=%s, target=%d chars, overlap=%d chars)",
+        source_name,
+        len(chunks),
+        plan.strategy,
+        plan.target_chars,
+        plan.overlap_chars,
+    )
     return chunks
 
 

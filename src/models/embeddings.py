@@ -84,13 +84,39 @@ class EmbeddingModel:
         from langchain_openai import OpenAIEmbeddings
 
         # ★ 使用独立的 Embedding Base URL，避免与 Chat 混用
-        # embedding_api_key 为空时自动回退到 llm_api_key
-        self._openai_client = OpenAIEmbeddings(
-            model=self.model_name,
-            api_key=self._settings.embedding_api_key or self._settings.llm_api_key,
-            base_url=self._settings.embedding_base_url,
-            dimensions=self.dimensions,
+        # DashScope embeddings must use an embedding-specific key to avoid
+        # accidentally sending requests with an unrelated chat-provider key.
+        is_dashscope = (
+            "dashscope.aliyuncs.com" in self._settings.embedding_base_url
+            or "maas.aliyuncs.com" in self._settings.embedding_base_url
         )
+        if is_dashscope:
+            api_key = self._settings.dashscope_api_key or self._settings.embedding_api_key
+        else:
+            api_key = self._settings.embedding_api_key or self._settings.llm_api_key
+        if not api_key or api_key == "sk-placeholder":
+            raise ValueError(
+                "EMBEDDING_API_KEY or DASHSCOPE_API_KEY is required for cloud embeddings"
+            )
+        embedding_kwargs = {
+            "model": self.model_name,
+            "api_key": api_key,
+            "base_url": self._settings.embedding_base_url,
+            "dimensions": self.dimensions,
+            "chunk_size": max(1, self._settings.embedding_batch_size),
+        }
+        if is_dashscope:
+            # DashScope OpenAI-compatible embeddings require `input` to be a
+            # string or list of strings. LangChain's default context-length
+            # check may tokenize inputs and send token-id arrays, which
+            # DashScope rejects with `input.contents` validation errors.
+            embedding_kwargs.update({
+                "check_embedding_ctx_length": False,
+                "tiktoken_enabled": False,
+                "chunk_size": min(max(1, self._settings.embedding_batch_size), 10),
+            })
+
+        self._openai_client = OpenAIEmbeddings(**embedding_kwargs)
         self._model = self._openai_client
         logger.info("Embedding: OpenAI %s (dim=%d)", self.model_name, self.dimensions)
 
@@ -133,7 +159,15 @@ class EmbeddingModel:
             return []
 
         if self.provider == "openai":
-            vectors = await self._openai_client.aembed_documents(texts)
+            batch_size = max(1, self._settings.embedding_batch_size)
+            if (
+                "dashscope.aliyuncs.com" in self._settings.embedding_base_url
+                or "maas.aliyuncs.com" in self._settings.embedding_base_url
+            ):
+                batch_size = min(batch_size, 10)
+            vectors = []
+            for i in range(0, len(texts), batch_size):
+                vectors.extend(await self._openai_client.aembed_documents(texts[i:i + batch_size]))
         else:
             vectors = self._local_model.embed_documents(texts)
 

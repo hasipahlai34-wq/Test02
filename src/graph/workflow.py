@@ -1,37 +1,10 @@
-"""
-# ============================================================
-# ★ LangGraph 主编排工作流 (StateGraph)
-# ← WeKnora: internal/agent/engine.go — ReAct 循环的核心引擎
-#   - executeLoop(): 主 ReAct 循环 (think → act → observe)
-#   - runReActIteration(): 单次迭代
-#   - isComplete(): 停止条件检查
-#   - analyzeResponse(): 响应分析
-#
-#   我们用 LangGraph StateGraph 替代自研 ReAct 循环:
-#   - 节点 (Node): 每个处理步骤 (分类/检索/生成/审核)
-#   - 边 (Edge): 节点之间的数据流
-#   - 条件边 (Conditional Edge): Adaptive-RAG 的动态路由
-#   - 状态 (State): GraphState 在节点之间自动传递
-# ============================================================
-
-本模块构建完整的 Adaptive-RAG 工作流:
-  classify → route → [no_retrieval|single_step|multi_step] →
-  generate → review → ragas_evaluate → guard → hitl_gate → END
-
-面试可讲:
-"我用 LangGraph 替代了 WeKnora 的自研 ReAct 循环。
-LangGraph 的好处是:
-1. StateGraph 显式定义了每个处理步骤和它们之间的依赖关系
-2. 条件边实现了 Adaptive-RAG 的动态路由
-3. 状态自动在节点间传递, 不需要手动管理
-4. 天然的流式支持 (stream_mode='updates')
-5. 内置的检查点 (checkpointer) 支持暂停/恢复/回溯"
-"""
+"""Docstring."""
 
 from __future__ import annotations
 
 import logging
 import asyncio
+import inspect
 import threading
 from typing import Literal, Optional
 
@@ -40,10 +13,12 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from src.graph.state import GraphState
 from src.graph.router import classify_query, route_by_complexity
+from src.utils.observability import langfuse_observation, langfuse_trace_context, with_langfuse_config
 
 logger = logging.getLogger(__name__)
 
 CacheRoute = Literal["cache_hit", "cache_miss"]
+ReviewRoute = Literal["ragas_evaluate", "guard"]
 
 
 def _route_by_cache(state: GraphState) -> CacheRoute:
@@ -52,75 +27,101 @@ def _route_by_cache(state: GraphState) -> CacheRoute:
     return "cache_miss"
 
 
+def _route_after_review(state: GraphState) -> ReviewRoute:
+    from config.settings import get_settings
+
+    if get_settings().ragas_online_enabled:
+        return "ragas_evaluate"
+    return "guard"
+
+
+def _trace_state_summary(state: GraphState | dict) -> dict:
+    """Small state summary for Langfuse node spans; avoid tracing full documents."""
+    return {
+        "query": str(state.get("rewritten_query") or state.get("query") or "")[:300],
+        "session_id": state.get("session_id"),
+        "complexity": state.get("complexity"),
+        "strategy": state.get("selected_strategy"),
+        "search_count": state.get("search_count"),
+        "cache_hit": state.get("cache_hit") or state.get("from_cache"),
+        "quality_passed": state.get("quality_passed"),
+        "quality_score": state.get("quality_score"),
+        "hitl_status": state.get("hitl_status"),
+        "has_retrieval_filter": bool(state.get("retrieval_filter")),
+    }
+
+
+def _trace_output_summary(output: object) -> object:
+    if not isinstance(output, dict):
+        return output
+    return {
+        "complexity": output.get("complexity"),
+        "strategy": output.get("selected_strategy"),
+        "search_count": output.get("search_count"),
+        "cache_hit": output.get("cache_hit") or output.get("from_cache"),
+        "quality_passed": output.get("quality_passed"),
+        "quality_score": output.get("quality_score"),
+        "hitl_status": output.get("hitl_status"),
+        "completed": output.get("completed"),
+        "answer_length": len(str(output.get("generated_answer") or output.get("final_response") or "")),
+        "retrieved_docs": len(output.get("retrieved_docs") or []),
+        "error": output.get("error"),
+    }
+
+
+def _observed_node(name: str, func, *, as_type: str = "span"):
+    """Wrap a LangGraph node in a Langfuse observation without changing behavior."""
+
+    async def wrapped(state: GraphState) -> dict:
+        with langfuse_observation(
+            name=f"workflow.{name}",
+            as_type=as_type,
+            input=_trace_state_summary(state),
+            metadata={"node": name},
+        ) as observation:
+            result = func(state)
+            if inspect.isawaitable(result):
+                result = await result
+            if observation is not None:
+                observation.update(output=_trace_output_summary(result))
+            return result
+
+    return wrapped
+
+
 # ================================================================
-# 构建 Adaptive-RAG StateGraph
+# 閺嬪嫬缂?Adaptive-RAG StateGraph
 # ================================================================
 
 
 def build_adaptive_rag_graph(
     checkpointer: Optional[MemorySaver] = None,
 ) -> StateGraph:
-    """
-    构建完整的 Adaptive-RAG LangGraph 工作流
-    ← WeKnora: engine.go Execute() + executeLoop() + 插件链
-
-    图结构:
-    ```
-    START
-      │
-      ▼
-    [classify_query] ← 查询复杂度分类
-      │
-      ├─ simple ──→ [no_retrieval] ──┐
-      ├─ medium ──→ [single_step]  ──┤
-      └─ complex ─→ [multi_step]   ──┘
-                                        │
-                                        ▼
-                                  [generate]       ← LLM 生成答案
-                                        │
-                                        ▼
-                                  [review]         ← 质量审核 + 熔断
-                                        │
-                                        ▼
-                                  [ragas_evaluate] ← ★ RAGAS 在线评估
-                                        │
-                                        ▼
-                                  [guard]          ← 内容护栏
-                                        │
-                                        ▼
-                                  [hitl_gate]      ← ★ HITL 审核门禁
-                                        │
-                                        ▼
-                                       END
-    ```
-
-    Returns:
-        编译后的 StateGraph (可调用 .invoke() / .astream())
-    """
+    """Docstring."""
     workflow = StateGraph(GraphState)
 
-    # ---- 注册节点 ----
-    workflow.add_node("classify_query", classify_query)
-    workflow.add_node("cache_lookup", _cache_lookup_node)
+    # ---- 濞夈劌鍞介懞鍌滃仯 ----
+    workflow.add_node("classify_query", _observed_node("classify_query", classify_query, as_type="chain"))
+    workflow.add_node("cache_lookup", _observed_node("cache_lookup", _cache_lookup_node, as_type="span"))
 
-    # 检索分支节点 (延迟导入避免循环依赖)
-    workflow.add_node("no_retrieval", _no_retrieval_node)
-    workflow.add_node("single_step", _single_step_node)
-    workflow.add_node("multi_step", _multi_step_node)
+    # 濡偓缁便垹鍨庨弨顖濆Ν閻?(瀵ゆ儼绻滅€电厧鍙嗛柆鍨帳瀵邦亞骞嗘笟婵婄)
+    workflow.add_node("no_retrieval", _observed_node("no_retrieval", _no_retrieval_node, as_type="span"))
+    workflow.add_node("single_step", _observed_node("single_step", _single_step_node, as_type="retriever"))
+    workflow.add_node("multi_step", _observed_node("multi_step", _multi_step_node, as_type="retriever"))
 
-    # 生成 + 审核 + RAGAS 评估 + 安全 + HITL
-    workflow.add_node("generate", _generate_node)
-    workflow.add_node("review", _review_node)
-    workflow.add_node("ragas_evaluate", _ragas_evaluate_node)
-    workflow.add_node("guard", _guard_node)
-    workflow.add_node("hitl_gate", _hitl_gate_node)
-    workflow.add_node("cache_store", _cache_store_node)
-    workflow.add_node("route_by_complexity", lambda state: {})
+    # 閻㈢喐鍨?+ 鐎光剝鐗?+ RAGAS 鐠囧嫪鍙?+ 鐎瑰鍙?+ HITL
+    workflow.add_node("generate", _observed_node("generate", _generate_node, as_type="chain"))
+    workflow.add_node("review", _observed_node("review", _review_node, as_type="evaluator"))
+    workflow.add_node("ragas_evaluate", _observed_node("ragas_evaluate", _ragas_evaluate_node, as_type="evaluator"))
+    workflow.add_node("guard", _observed_node("guard", _guard_node, as_type="guardrail"))
+    workflow.add_node("hitl_gate", _observed_node("hitl_gate", _hitl_gate_node, as_type="span"))
+    workflow.add_node("cache_store", _observed_node("cache_store", _cache_store_node, as_type="span"))
+    workflow.add_node("route_by_complexity", _observed_node("route_by_complexity", lambda state: {}, as_type="span"))
 
-    # ---- 设置入口 ----
+    # ---- 鐠佸墽鐤嗛崗銉ュ經 ----
     workflow.set_entry_point("classify_query")
 
-    # ---- 条件边: Adaptive-RAG 核心路由 ----
+    # ---- 閺夆€叉鏉? Adaptive-RAG 閺嶇绺剧捄顖滄暠 ----
     workflow.add_edge("classify_query", "cache_lookup")
     workflow.add_conditional_edges(
         "cache_lookup",
@@ -140,32 +141,39 @@ def build_adaptive_rag_graph(
         },
     )
 
-    # ---- 所有检索分支汇聚到 generate ----
+    # ---- 閹碘偓閺堝顥呯槐銏犲瀻閺€顖涚湽閼辨艾鍩?generate ----
     workflow.add_edge("no_retrieval", "generate")
     workflow.add_edge("single_step", "generate")
     workflow.add_edge("multi_step", "generate")
 
-    # ---- 生成 → 审核 → RAGAS → 护栏 → HITL → 结束 ----
+    # ---- 閻㈢喐鍨?閳?鐎光剝鐗?閳?RAGAS 閳?閹躲倖鐖?閳?HITL 閳?缂佹挻娼?----
     workflow.add_edge("generate", "review")
-    workflow.add_edge("review", "ragas_evaluate")
+    workflow.add_conditional_edges(
+        "review",
+        _route_after_review,
+        {
+            "ragas_evaluate": "ragas_evaluate",
+            "guard": "guard",
+        },
+    )
     workflow.add_edge("ragas_evaluate", "guard")
     workflow.add_edge("guard", "hitl_gate")
     workflow.add_edge("hitl_gate", "cache_store")
     workflow.add_edge("cache_store", END)
 
-    # ---- 编译 ----
+    # ---- 缂傛牞鐦?----
     if checkpointer is None:
         checkpointer = MemorySaver()
 
     app = workflow.compile(checkpointer=checkpointer)
-    logger.info("Adaptive-RAG Graph 编译完成: %d 节点", len(workflow.nodes))
+    logger.info("Adaptive-RAG graph compiled: %d nodes", len(workflow.nodes))
 
     return app
 
 
 # ================================================================
-# LangGraph 节点实现
-# (在 workflow.py 中作为模块级函数定义，也可独立为文件)
+# LangGraph 閼哄倻鍋ｇ€圭偟骞?
+# (閸?workflow.py 娑擃厺缍旀稉鐑樐侀崸妤冮獓閸戣姤鏆熺€规矮绠熼敍灞肩瘍閸欘垳瀚粩瀣╄礋閺傚洣娆?
 # ================================================================
 
 
@@ -257,16 +265,14 @@ async def _store_semantic_cache_background(query: str, answer: str) -> None:
 
 
 async def _no_retrieval_node(state: GraphState) -> dict:
-    """
-    无检索节点 — 简单查询跳过检索
-    ← Adaptive-RAG: simple 查询路由到此
-    """
+    """Docstring."""
     query = state.get("query", "")
-    logger.info("[no_retrieval] 跳过检索: '%s...'", query[:60])
+    logger.info("[no_retrieval] 鐠哄疇绻冨Λ鈧槐? '%s...'", query[:60])
     return {
+        "selected_strategy": "no_retrieval",
         "retrieved_docs": [],
         "search_count": 0,
-        "search_result_summary": "无检索 (查询复杂度: simple)",
+        "search_result_summary": "閺冪姵顥呯槐?(閺屻儴顕楁径宥嗘絽鎼? simple)",
     }
 
 
@@ -307,18 +313,18 @@ def _input_safety_blocked_result(input_result: dict) -> dict:
         "search_result_summary": "input_safety_blocked",
         "safety_input_check": input_result,
         "input_safety_blocked": True,
-        "generated_answer": "输入内容不安全，已拦截。",
+        "generated_answer": "Input content is unsafe; request blocked.",
         "completed": True,
         "error": "input_content_unsafe",
     }
 
 
 def _format_search_summary(docs: list, max_items: int = 5) -> str:
-    """★ 检索结果格式化 (共享工具函数) — 消除 _single_step_node / _multi_step_node 重复"""
+    """Docstring."""
     if not docs:
-        return "未检索到相关内容"
+        return "閺堫亝顥呯槐銏犲煂閻╃鍙ч崘鍛啇"
     return "\n".join(
-        f"[{i+1}] (分数:{d.score:.2f}) {d.content[:150]}..."
+        f"[{i+1}] (閸掑棙鏆?{d.score:.2f}) {d.content[:150]}..."
         for i, d in enumerate(docs[:max_items])
     )
 
@@ -327,7 +333,7 @@ async def _csv_sources_from_active_scope(
     retrieval_filter: dict | None,
     indexer: object | None = None,
 ) -> list[str]:
-    """Find CSV sources from indexed metadata when retrieval returned no CSV docs."""
+    """Docstring."""
     if not retrieval_filter:
         return []
 
@@ -363,19 +369,16 @@ async def _csv_sources_from_active_scope(
 
 async def _single_step_node(state: GraphState) -> dict:
     query = state.get("rewritten_query") or state.get("query", "")
-    return await _run_retrieval_with_input_safety(
+    result = await _run_retrieval_with_input_safety(
         query,
         _single_step_retrieve_node(state),
     )
+    result["selected_strategy"] = "single_step"
+    return result
 
 
 async def _single_step_retrieve_node(state: GraphState) -> dict:
-    """
-    单步检索节点 — BM25 + Dense + Rerank
-    ← WeKnora: chat_pipeline/ 完整 RAG Pipeline
-
-    ★ CSV 聚合增强: 检测聚合查询 → pandas 直接计算 CSV → 结果前置
-    """
+    """Docstring."""
     from src.retrieval.single_step import (
         calculate_markdown_table_aggregation,
         get_single_step,
@@ -390,7 +393,7 @@ async def _single_step_retrieve_node(state: GraphState) -> dict:
     query = state.get("rewritten_query") or state.get("query", "")
 
     try:
-        strategy = await get_single_step()  # ★ C5: 单例复用 BM25 索引
+        strategy = await get_single_step()  # 閳?C5: 閸楁洑绶ユ径宥囨暏 BM25 缁便垹绱?
 
         agent_state = AgentState.from_graph_state(dict(state))
         agent_state.query = query
@@ -419,7 +422,7 @@ async def _single_step_retrieve_node(state: GraphState) -> dict:
                 },
             ))
 
-        # ★ CSV 聚合查询增强: 检测聚合关键词 → pandas 计算 → 结果前置
+        # 閳?CSV 閼辨艾鎮庨弻銉嚄婢х偛宸? 濡偓濞村浠涢崥鍫濆彠闁款喛鐦?閳?pandas 鐠侊紕鐣?閳?缂佹挻鐏夐崜宥囩枂
         if is_aggregate_query(query):
             csv_paths = find_csv_sources_from_docs(docs)
             if not csv_paths:
@@ -432,7 +435,7 @@ async def _single_step_retrieve_node(state: GraphState) -> dict:
                     agg_text = execute_csv_aggregation(csv_path, query)
                     if agg_text:
                         agg_doc = TypedDocument(
-                            content=f"[CSV 聚合计算结果]\n{agg_text}",
+                            content=f"[CSV 閼辨艾鎮庣拋锛勭暬缂佹挻鐏塢\n{agg_text}",
                             score=1.0,
                             match_type=MatchType.HYBRID,
                             chunk_index=-1,
@@ -442,28 +445,26 @@ async def _single_step_retrieve_node(state: GraphState) -> dict:
                                 "query_type": "csv_aggregation",
                             },
                         )
-                        docs.insert(0, agg_doc)  # ★ 聚合结果前置
+                        docs.insert(0, agg_doc)  # 閳?閼辨艾鎮庣紒鎾寸亯閸撳秶鐤?
                         logger.info(
-                            "[single_step] CSV 聚合命中: %s → %d chars",
+                            "[single_step] CSV 閼辨艾鎮庨崨鎴掕厬: %s 閳?%d chars",
                             csv_path, len(agg_text),
                         )
-                        break  # 只处理第一个匹配的 CSV 文件
+                        break  # 閸欘亜顦╅悶鍡欘儑娑撯偓娑擃亜灏柊宥囨畱 CSV 閺傚洣娆?
                 except Exception as e:
-                    logger.warning("[single_step] CSV 聚合降级: %s", e)
+                    logger.warning("[single_step] CSV 閼辨艾鎮庨梽宥囬獓: %s", e)
 
         summary = _format_search_summary(docs)
 
-        logger.info("[single_step] 检索完成: %d 个文档", len(docs))
+        logger.info("[single_step] retrieval completed: %d docs", len(docs))
     except (ConnectionError, TimeoutError) as e:
-        # 网络/向量数据库不可用 → 降级为空检索（预期内的故障）
-        logger.warning("[single_step] 服务不可用，降级为空检索: %s", e)
+        # 缂冩垹绮?閸氭垿鍣洪弫鐗堝祦鎼存挷绗夐崣顖滄暏 閳?闂勫秶楠囨稉铏光敄濡偓缁鳖澁绱欐０鍕埂閸愬懐娈戦弫鍛存閿?        logger.warning("[single_step] 閺堝秴濮熸稉宥呭讲閻㈩煉绱濋梽宥囬獓娑撹櫣鈹栧Λ鈧槐? %s", e)
         docs = []
-        summary = "检索服务暂不可用，请稍后重试"
+        summary = "Retrieval service is unavailable; please retry later."
     except Exception as e:
-        # 未预期的代码逻辑错误 → 记录 critical 并降级
-        logger.critical("[single_step] 检索异常: %s", e, exc_info=True)
+        # 閺堫亪顣╅張鐔烘畱娴狅絿鐖滈柅鏄忕帆闁挎瑨顕?閳?鐠佹澘缍?critical 楠炲爼妾风痪?        logger.critical("[single_step] 濡偓缁便垹绱撶敮? %s", e, exc_info=True)
         docs = []
-        summary = f"检索内部错误: {type(e).__name__}"
+        summary = f"濡偓缁便垹鍞撮柈銊╂晩鐠? {type(e).__name__}"
 
     return {
         "retrieved_docs": docs,
@@ -474,17 +475,16 @@ async def _single_step_retrieve_node(state: GraphState) -> dict:
 
 async def _multi_step_node(state: GraphState) -> dict:
     query = state.get("rewritten_query") or state.get("query", "")
-    return await _run_retrieval_with_input_safety(
+    result = await _run_retrieval_with_input_safety(
         query,
         _multi_step_retrieve_node(state),
     )
+    result["selected_strategy"] = "multi_step"
+    return result
 
 
 async def _multi_step_retrieve_node(state: GraphState) -> dict:
-    """
-    多步迭代检索节点 — 迭代检索 + HyDE + 改写
-    ← Adaptive-RAG: complex 查询路由到此
-    """
+    """Docstring."""
     from src.retrieval.multi_step import MultiStepStrategy
     from src.retrieval.single_step import calculate_markdown_table_aggregation
     from src.types import AgentState, Document as TypedDocument, MatchType
@@ -525,15 +525,15 @@ async def _multi_step_retrieve_node(state: GraphState) -> dict:
         if hyde_hypothesis:
             hyde_update["hyde_hypothesis"] = hyde_hypothesis
 
-        logger.info("[multi_step] 多步检索完成: %d 个文档", len(docs))
+        logger.info("[multi_step] retrieval completed: %d docs", len(docs))
     except (ConnectionError, TimeoutError) as e:
-        logger.warning("[multi_step] 服务不可用，降级为空检索: %s", e)
+        logger.warning("[multi_step] 閺堝秴濮熸稉宥呭讲閻㈩煉绱濋梽宥囬獓娑撹櫣鈹栧Λ鈧槐? %s", e)
         docs = []
-        summary = "检索服务暂不可用，请稍后重试"
+        summary = "Retrieval service is unavailable; please retry later."
     except Exception as e:
-        logger.critical("[multi_step] 检索异常: %s", e, exc_info=True)
+        logger.critical("[multi_step] 濡偓缁便垹绱撶敮? %s", e, exc_info=True)
         docs = []
-        summary = f"检索内部错误: {type(e).__name__}"
+        summary = f"濡偓缁便垹鍞撮柈銊╂晩鐠? {type(e).__name__}"
 
     return {
         "retrieved_docs": docs,
@@ -544,28 +544,50 @@ async def _multi_step_retrieve_node(state: GraphState) -> dict:
 
 
 async def _generate_node(state: GraphState) -> dict:
-    """
-    生成节点 — 组装 Prompt + LLM 生成答案
-    ← WeKnora: chat_pipeline/chat_completion.go + chat_completion_stream.go
-    """
+    """Generate an answer; optionally emit token deltas via LangGraph custom stream."""
     from src.agents.generator import generate_answer
 
     if state.get("input_safety_blocked"):
         return {
-            "generated_answer": state.get("generated_answer", "输入内容不安全，已拦截。"),
+            "generated_answer": state.get("generated_answer", "Input content is unsafe; request blocked."),
             "completed": True,
             "error": state.get("error", "input_content_unsafe"),
         }
 
-    result = await generate_answer(state)
-    return result
+    if not state.get("stream_tokens"):
+        return await generate_answer(state)
+
+    result = await generate_answer(state, stream=True)
+    answer_stream = result.pop("answer_stream", None)
+    if answer_stream is None:
+        return result
+
+    answer_parts: list[str] = []
+    try:
+        from langgraph.config import get_stream_writer
+
+        writer = get_stream_writer()
+    except Exception:
+        writer = None
+
+    async for delta in answer_stream:
+        if not delta:
+            continue
+        text = str(delta)
+        answer_parts.append(text)
+        if writer is not None:
+            writer({"event": "answer_delta", "text": text})
+
+    answer = "".join(answer_parts)
+    return {
+        **result,
+        "generated_answer": answer,
+        "completed": True,
+    }
 
 
 async def _review_node(state: GraphState) -> dict:
-    """
-    审核节点 — 答案质量评估 + 熔断器更新
-    ← WeKnora: engine.go analyzeResponse() + 原项目 B 质量熔断
-    """
+    """Docstring."""
     from src.agents.reviewer import review_answer
 
     if state.get("complexity") == "simple":
@@ -580,10 +602,7 @@ async def _review_node(state: GraphState) -> dict:
 
 
 async def _guard_node(state: GraphState) -> dict:
-    """
-    安全护栏节点 — 内容审核 + HITL 判断
-    ← 原项目 B content_guard.py
-    """
+    """Docstring."""
     from src.safety.content_guard import check_output_safety
 
     result = await check_output_safety(state)
@@ -591,10 +610,16 @@ async def _guard_node(state: GraphState) -> dict:
 
 
 async def _ragas_evaluate_node(state: GraphState) -> dict:
-    """
-    ★ RAGAS 在线评估节点 — 每次查询后自动评分
-    异步非阻塞, 失败不影响主流程
-    """
+    """Docstring."""
+    from config.settings import get_settings
+
+    if not get_settings().ragas_online_enabled:
+        return {
+            "ragas_scores": None,
+            "ragas_eval_error": "disabled",
+            "ragas_review_failed": False,
+        }
+
     threading.Thread(
         target=lambda: asyncio.run(_ragas_evaluate_and_log(dict(state))),
         daemon=True,
@@ -630,10 +655,7 @@ async def _ragas_evaluate_and_log(state: GraphState) -> None:
 
 
 async def _hitl_gate_node(state: GraphState) -> dict:
-    """
-    ★ HITL 审核门禁节点 — 综合判断是否需要人工介入
-    支持 interrupt (Streamlit) 和 file_queue (CLI/API) 双模式
-    """
+    """Docstring."""
     from src.graph.hitl import hitl_gate_node
 
     result = await hitl_gate_node(state)
@@ -641,7 +663,7 @@ async def _hitl_gate_node(state: GraphState) -> dict:
 
 
 # ================================================================
-# 便捷执行函数
+# 娓氭寧宓庨幍褑顢戦崙鑺ユ殶
 # ================================================================
 
 
@@ -650,21 +672,18 @@ async def run_adaptive_rag(
     session_id: str = "default",
     config: Optional[dict] = None,
 ) -> GraphState:
-    """
-    一键执行 Adaptive-RAG 工作流 (同步等待完整结果)
-
-    Args:
-        query: 用户查询
-        session_id: 会话 ID
-        config: LangGraph 配置 (thread_id 等)
-
-    Returns:
-        最终的 GraphState (包含 generated_answer)
-    """
+    """Docstring."""
     app = build_adaptive_rag_graph()
 
     if config is None:
         config = {"configurable": {"thread_id": session_id}}
+    config = with_langfuse_config(
+        config,
+        trace_name="adaptive-rag.ask",
+        session_id=session_id,
+        metadata={"entrypoint": "workflow", "query": query},
+        tags=["workflow"],
+    )
 
     initial_state: GraphState = {
         "query": query,
@@ -684,7 +703,13 @@ async def run_adaptive_rag(
         "final_response": "",
     }
 
-    final_state = await app.ainvoke(initial_state, config)
+    with langfuse_trace_context(
+        trace_name="adaptive-rag.ask",
+        session_id=session_id,
+        metadata={"entrypoint": "workflow", "query": query},
+        tags=["workflow"],
+    ):
+        final_state = await app.ainvoke(initial_state, config)
     return final_state
 
 
@@ -694,17 +719,18 @@ async def run_adaptive_rag_stream(
     config: Optional[dict] = None,
     retrieval_filter: Optional[dict] = None,
 ):
-    """
-    流式执行 Adaptive-RAG 工作流
-    ← WeKnora: SSE Stream → LangGraph stream_mode="updates"
-
-    Yields:
-        每个节点的输出更新 (dict)
-    """
+    """Docstring."""
     app = build_adaptive_rag_graph()
 
     if config is None:
         config = {"configurable": {"thread_id": session_id}}
+    config = with_langfuse_config(
+        config,
+        trace_name="adaptive-rag.stream",
+        session_id=session_id,
+        metadata={"entrypoint": "workflow.stream", "query": query},
+        tags=["workflow", "stream"],
+    )
 
     initial_state: GraphState = {
         "query": query,
@@ -725,9 +751,15 @@ async def run_adaptive_rag_stream(
         "final_response": "",
     }
 
-    logger.info("开始流式执行 Adaptive-RAG: '%s...'", query[:60])
+    logger.info("瀵偓婵绁﹀蹇斿⒔鐞?Adaptive-RAG: '%s...'", query[:60])
 
-    async for event in app.astream(initial_state, config, stream_mode="updates"):
-        yield event
+    with langfuse_trace_context(
+        trace_name="adaptive-rag.stream",
+        session_id=session_id,
+        metadata={"entrypoint": "workflow.stream", "query": query},
+        tags=["workflow", "stream"],
+    ):
+        async for event in app.astream(initial_state, config, stream_mode="updates"):
+            yield event
 
-    logger.info("Adaptive-RAG 流式执行完成")
+    logger.info("Adaptive-RAG streaming execution completed")
